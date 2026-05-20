@@ -62,9 +62,13 @@ def train_dqn(states, num_episodes=2):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     num_actions = 5
     
+    # Auto-detect input dimension from states
+    input_dim = states.shape[1] if len(states.shape) > 1 else len(states[0])
+    print(f"DQN input dimension: {input_dim}")
+    
     # Initialize networks
-    policy_net = DQN(input_dim=5, output_dim=num_actions).to(device)
-    target_net = DQN(input_dim=5, output_dim=num_actions).to(device)
+    policy_net = DQN(input_dim=input_dim, output_dim=num_actions).to(device)
+    target_net = DQN(input_dim=input_dim, output_dim=num_actions).to(device)
     target_net.load_state_dict(policy_net.state_dict())
     target_net.eval()
     

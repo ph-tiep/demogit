@@ -1,0 +1,30 @@
+======================================================================
+BASELINE vs VAE COMPARISON SUMMARY
+======================================================================
+
+APPROACH COMPARISON:
+----------------------------------------------------------------------
+Baseline:
+  - Feature dimension: 5D
+  - Features: mean_rssi, num_active_bs, Lat, Lon, hour
+  - Total files: 6
+
+VAE:
+  - Feature dimension: 3D (compressed)
+  - Compression ratio: 1.67x
+  - Total files: 8
+
+
+COMMON FILES:
+----------------------------------------------------------------------
+  ✓ IFroc_curve.pdf
+  ✓ RFroc_curve.pdf
+  ✓ anomaly_map.pdf
+  ✓ combined_ROC_curves_with_labels.pdf
+  ✓ confusion_matrix.pdf
+  ✓ feature_importance.pdf
+
+VAE-SPECIFIC FILES:
+----------------------------------------------------------------------
+  • vae_latent_space.pdf
+  • vae_training_loss.pdf
