@@ -56,3 +56,49 @@ def calculate_roc_metrics(y_true, y_scores):
     fpr, tpr, thresholds = roc_curve(y_true, y_scores)
     auc = roc_auc_score(y_true, y_scores)
     return fpr, tpr, auc
+
+def evaluate_digital_twin_classification(qualities, y_test):
+    """Evaluate Digital Twin classification performance (connection quality prediction)"""
+    y_pred = (qualities > 0.5).astype(int)
+    accuracy = accuracy_score(y_test, y_pred)
+
+    print(f"Digital Twin Classification Accuracy: {accuracy:.4f}")
+    print(f"\nClassification Report:\n{classification_report(y_test, y_pred)}")
+
+    return y_pred, accuracy
+
+def evaluate_digital_twin_anomaly(anomaly_scores, is_anomalies, y_true_anomaly=None):
+    """Evaluate Digital Twin anomaly detection performance"""
+    print(f"\nDigital Twin Anomaly Detection Results:")
+    print(f"  Anomaly scores - Mean: {np.mean(anomaly_scores):.4f}, "
+          f"Std: {np.std(anomaly_scores):.4f}")
+    print(f"  Anomalies detected: {np.sum(is_anomalies)} / {len(is_anomalies)} "
+          f"({100*np.mean(is_anomalies):.2f}%)")
+
+    if y_true_anomaly is not None:
+        auc = roc_auc_score(y_true_anomaly, anomaly_scores)
+        print(f"  AUC Score (anomaly): {auc:.4f}")
+        return y_true_anomaly, anomaly_scores, auc
+
+    return None, anomaly_scores, None
+
+def compute_innovation_statistics(dt):
+    """Compute innovation (prediction error) statistics from EKF history"""
+    if len(dt.chi2_history) == 0:
+        return {}
+
+    recent = np.array(dt.chi2_history[-500:]) if len(dt.chi2_history) > 500 else np.array(dt.chi2_history)
+
+    stats = {
+        'mean_innovation': float(np.mean(recent)),
+        'std_innovation': float(np.std(recent)),
+        'max_innovation': float(np.max(recent)),
+        'min_innovation': float(np.min(recent)),
+        'median_innovation': float(np.median(recent)),
+        'p95_innovation': float(np.percentile(recent, 95)),
+        'p99_innovation': float(np.percentile(recent, 99)),
+        'total_steps': dt.step_count,
+        'adaptive_threshold': float(dt._compute_adaptive_threshold())
+    }
+
+    return stats

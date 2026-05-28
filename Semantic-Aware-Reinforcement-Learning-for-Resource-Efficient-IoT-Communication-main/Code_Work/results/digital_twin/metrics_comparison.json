@@ -1,0 +1,14 @@
+{
+  "Digital Twin (EKF)": {
+    "Classification Accuracy": 0.9803867019056892,
+    "Classification AUC": 0.5581644810458779,
+    "Anomaly AUC": 0.265111062459662,
+    "Mean Innovation": 3.931738778281524
+  },
+  "Random Forest (Baseline)": {
+    "Classification Accuracy": 0.9998608985950758,
+    "Classification AUC": 1.0,
+    "Anomaly AUC": 1.0,
+    "Mean Innovation": null
+  }
+}

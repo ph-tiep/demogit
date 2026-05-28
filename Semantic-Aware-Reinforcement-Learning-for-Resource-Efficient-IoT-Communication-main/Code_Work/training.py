@@ -5,6 +5,7 @@ import numpy as np
 import random
 from models import DQN, ReplayMemory, SimpleEnv, create_random_forest_classifier, create_isolation_forest
 from sklearn.model_selection import train_test_split
+from digital_twin import DigitalTwinEKF, EKFConfig, train_digital_twin
 
 # Hyperparameters
 BATCH_SIZE = 64
@@ -122,3 +123,62 @@ def train_isolation_forest(X_scaled):
     anomaly_labels = iso_forest.fit_predict(X_scaled)
     print("Isolation Forest training completed.")
     return iso_forest, anomaly_labels
+
+def train_digital_twin_on_data(X_train, feature_names, epochs=1):
+    """
+    Train Digital Twin (EKF) on training data.
+    """
+    from digital_twin import DigitalTwinEKF, EKFConfig
+
+    print("Initializing Digital Twin (EKF)...")
+
+    config = EKFConfig(
+        state_dim=3,
+        obs_dim=X_train.shape[1],
+        process_noise=0.01,
+        measurement_noise=0.05,
+        innovation_threshold=3.5,
+        min_innovation_history=50
+    )
+
+    dt = DigitalTwinEKF(config)
+
+    burn_in = min(100, len(X_train) // 10)
+    print(f"Digital Twin burn-in on {burn_in} samples...")
+
+    for i in range(burn_in):
+        obs_params = X_train[i]
+        dt.step(obs_params)
+
+    print("Digital Twin initialization completed.")
+    print(f"  Initial state quality: {np.clip(dt.x[0], 0.0, 1.0):.4f}")
+    print(f"  RSSI component: {np.clip(dt.x[1], 0.0, 1.0):.4f}")
+    print(f"  BS component: {np.clip(dt.x[2], 0.0, 1.0):.4f}")
+
+    return dt, config
+
+def predict_with_digital_twin(dt, X_test, feature_names):
+    """
+    Use trained Digital Twin to predict connection quality and detect anomalies.
+    """
+    print("Running Digital Twin predictions on test set...")
+
+    qualities = np.zeros(len(X_test))
+    anomaly_scores = np.zeros(len(X_test))
+    is_anomalies = np.zeros(len(X_test), dtype=bool)
+
+    for i in range(len(X_test)):
+        obs = X_test[i]
+        _, quality, score, is_anom = dt.step(obs)
+        qualities[i] = quality
+        anomaly_scores[i] = score
+        is_anomalies[i] = is_anom
+
+        if (i + 1) % 1000 == 0:
+            print(f"  Processed {i + 1}/{len(X_test)} samples...")
+
+    print(f"Digital Twin prediction completed.")
+    print(f"  Mean quality: {np.mean(qualities):.4f}")
+    print(f"  Anomaly rate: {np.mean(is_anomalies):.4f}")
+
+    return qualities, anomaly_scores, is_anomalies
