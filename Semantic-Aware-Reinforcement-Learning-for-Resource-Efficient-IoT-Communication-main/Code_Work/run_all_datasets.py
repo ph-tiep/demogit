@@ -179,30 +179,28 @@ def save_json(data, path):
 
 def baseline_unsupervised(semantic_df, quality_labels):
     """
-    Unsupervised baseline (no label used during fitting):
-      - K-Means (k=2) for quality classification
-      - LOF (Local Outlier Factor) for anomaly detection
-    Both are fully unsupervised — fair comparison with the proposed DT-EKF.
+    Unsupervised baselines (no label used during fitting):
+      Quality classification : K-Means (k=2)  +  GMM (k=2)
+      Anomaly detection      : LOF  (scores returned for fault-injection eval)
+    All methods are fully unsupervised — fair comparison with DT-EKF.
     """
     features = [c for c in ['mean_rssi', 'num_active_bs', 'Latitude', 'Longitude', 'hour']
                 if c in semantic_df.columns]
     scaler = MinMaxScaler()
     X = scaler.fit_transform(semantic_df[features].values)
     y_true = quality_labels
+    rssi_raw = semantic_df['mean_rssi'].values
 
     # ── K-Means quality classification ────────────────────────────────────
     km = KMeans(n_clusters=2, random_state=42, n_init=10)
     km_labels = km.fit_predict(X)
 
-    # Identify which cluster = "good": cluster with higher mean raw RSSI
-    rssi_raw = semantic_df['mean_rssi'].values
     c0_rssi = rssi_raw[km_labels == 0].mean()
     c1_rssi = rssi_raw[km_labels == 1].mean()
     good_cluster = 0 if c0_rssi > c1_rssi else 1
     km_quality = (km_labels == good_cluster).astype(int)
 
     km_acc = accuracy_score(y_true, km_quality)
-    # Confidence: distance to centroid of good cluster (inverse → closer = more confident)
     dist_to_good = np.linalg.norm(X - km.cluster_centers_[good_cluster], axis=1)
     km_conf = 1.0 / (1.0 + dist_to_good)
     try:
@@ -212,27 +210,44 @@ def baseline_unsupervised(semantic_df, quality_labels):
         km_auc = 0.5
         km_fpr, km_tpr = np.array([0, 1]), np.array([0, 1])
 
+    # ── GMM quality classification ─────────────────────────────────────────
+    gmm = GaussianMixture(n_components=2, covariance_type='full',
+                          random_state=42, max_iter=200)
+    gmm.fit(X)
+    gmm_labels = gmm.predict(X)
+
+    c0_rssi_g = rssi_raw[gmm_labels == 0].mean()
+    c1_rssi_g = rssi_raw[gmm_labels == 1].mean()
+    good_comp = 0 if c0_rssi_g > c1_rssi_g else 1
+    gmm_quality = (gmm_labels == good_comp).astype(int)
+
+    gmm_acc = accuracy_score(y_true, gmm_quality)
+    # Posterior probability of belonging to "good" component as confidence
+    gmm_proba = gmm.predict_proba(X)[:, good_comp]
+    try:
+        gmm_auc = roc_auc_score(y_true, gmm_proba)
+        gmm_fpr, gmm_tpr, _ = roc_curve(y_true, gmm_proba)
+    except ValueError:
+        gmm_auc = 0.5
+        gmm_fpr, gmm_tpr = np.array([0, 1]), np.array([0, 1])
+
     # ── LOF anomaly detection ──────────────────────────────────────────────
+    # Scores are returned raw; AUC is computed in run_experiment against
+    # fault-injection ground truth (y_fault), not LOF's own pseudo-labels.
     lof = LocalOutlierFactor(n_neighbors=20, contamination=0.05, novelty=False)
-    lof_pred = lof.fit_predict(X)          # 1 = normal, -1 = anomaly
-    y_anom = (lof_pred == -1).astype(int)  # 1 = anomaly, 0 = normal
+    lof.fit_predict(X)
     lof_scores = -lof.negative_outlier_factor_  # higher = more anomalous
 
-    try:
-        lof_auc = roc_auc_score(y_anom, lof_scores)
-        lof_fpr, lof_tpr, _ = roc_curve(y_anom, lof_scores)
-    except ValueError:
-        lof_auc = 0.5
-        lof_fpr, lof_tpr = np.array([0, 1]), np.array([0, 1])
-
     print(f"  [Baseline K-Means]  Acc={km_acc:.4f}  AUC={km_auc:.4f}")
-    print(f"  [Baseline LOF]      AUC={lof_auc:.4f}")
+    print(f"  [Baseline GMM]      Acc={gmm_acc:.4f}  AUC={gmm_auc:.4f}")
+    print(f"  [Baseline LOF]      scores computed (AUC vs fault-injection GT)")
 
     return {
-        'km_acc': km_acc,  'km_auc': km_auc,
-        'km_fpr': km_fpr,  'km_tpr': km_tpr,
-        'lof_auc': lof_auc, 'lof_fpr': lof_fpr, 'lof_tpr': lof_tpr,
-        'y_anom': y_anom,   # LOF pseudo-labels used by DT evaluation
+        'km_acc':  km_acc,   'km_auc':  km_auc,
+        'km_fpr':  km_fpr,   'km_tpr':  km_tpr,
+        'gmm_acc': gmm_acc,  'gmm_auc': gmm_auc,
+        'gmm_fpr': gmm_fpr,  'gmm_tpr': gmm_tpr,
+        'lof_scores': lof_scores,   # raw scores for fault-injection eval
     }
 
 
@@ -291,10 +306,36 @@ def run_experiment(dataset_name, semantic_df, vae_X_norm, vae_input_dim,
         dt_rssi_thresh = -110.0
         dt_bs_thresh   = 3 if semantic_df['num_active_bs'].max() > 1 else 1
 
+    # ── Fault injection — ground truth for anomaly detection eval ─────────
+    print("\n[Fault Injection] Injecting synthetic faults into obs_seq ...")
+    obs_seq_injected, y_fault = inject_anomalies(obs_seq, fraction=0.05, seed=42)
+
     # ── 1. Baseline (unsupervised) ─────────────────────────────────────────
-    print("\n[1/4] Baseline K-Means + LOF (unsupervised) ...")
+    print("\n[1/4] Baseline K-Means + GMM + LOF (unsupervised) ...")
     baseline = baseline_unsupervised(semantic_df, quality_labels)
-    y_anom_true = baseline['y_anom']  # LOF pseudo-labels
+
+    # Rolling Z-score on the fault-injected RSSI series
+    zscore_scores = rolling_zscore_anomaly(obs_seq_injected[:, 0], window=20)
+
+    # Evaluate LOF and Z-score against fault-injection ground truth
+    try:
+        lof_auc = roc_auc_score(y_fault, baseline['lof_scores'])
+        lof_fpr, lof_tpr, _ = roc_curve(y_fault, baseline['lof_scores'])
+    except ValueError:
+        lof_auc = 0.5
+        lof_fpr, lof_tpr = np.array([0, 1]), np.array([0, 1])
+
+    try:
+        zs_auc = roc_auc_score(y_fault, zscore_scores)
+        zs_fpr, zs_tpr, _ = roc_curve(y_fault, zscore_scores)
+    except ValueError:
+        zs_auc = 0.5
+        zs_fpr, zs_tpr = np.array([0, 1]), np.array([0, 1])
+
+    print(f"  [Baseline LOF]      AUC vs fault-GT={lof_auc:.4f}")
+    print(f"  [Baseline Z-Score]  AUC vs fault-GT={zs_auc:.4f}")
+
+    y_anom_true = y_fault  # use fault-injection GT for DT evaluation
 
     # ── 2. VAE ────────────────────────────────────────────────────────────
     print("\n[2/4] Training VAE ...")
@@ -323,7 +364,7 @@ def run_experiment(dataset_name, semantic_df, vae_X_norm, vae_input_dim,
         process_noise=cfg['dt_proc_noise'],
         obs_noise=cfg['dt_obs_noise'],
     )
-    dt_results = dt.run_sequence(obs_seq)
+    dt_results = dt.run_sequence(obs_seq_injected)
 
     dt_quality_m = evaluate_digital_twin_quality(dt_results, quality_labels)
     dt_anomaly_m = evaluate_digital_twin_anomaly(dt_results, y_anom_true)
@@ -373,7 +414,7 @@ def run_experiment(dataset_name, semantic_df, vae_X_norm, vae_input_dim,
     baseline_agg = {
         'quality_accuracy': baseline['km_acc'],
         'quality_auc':      baseline['km_auc'],
-        'anomaly_auc':      baseline['lof_auc'],
+        'anomaly_auc':      lof_auc,
         'avg_reward':       float(np.mean(ep_rewards[:5])),   # first-5 episodes (untrained)
     }
     proposed_agg = {
@@ -394,8 +435,11 @@ def run_experiment(dataset_name, semantic_df, vae_X_norm, vae_input_dim,
         'madrl_train':   {'avg_reward_last20': float(np.mean(ep_rewards[-20:])),
                           'avg_reward_eval':   float(np.mean(eval_rewards)),
                           'std_reward_eval':   float(np.std(eval_rewards))},
-        'baseline_kmeans': {'accuracy': baseline['km_acc'],  'auc': baseline['km_auc']},
-        'baseline_lof':    {'auc': baseline['lof_auc']},
+        'baseline_kmeans':  {'accuracy': baseline['km_acc'], 'auc': baseline['km_auc']},
+        'baseline_gmm':     {'accuracy': baseline['gmm_acc'], 'auc': baseline['gmm_auc']},
+        'baseline_lof':     {'auc': lof_auc},
+        'baseline_zscore':  {'auc': zs_auc},
+        'fault_injection':  {'n_faults': int(y_fault.sum()), 'n_total': int(len(y_fault))},
         'comparison':    comp,
     }
     save_json(all_metrics, res_dir / 'metrics.json')
@@ -423,16 +467,33 @@ def run_experiment(dataset_name, semantic_df, vae_X_norm, vae_input_dim,
     plt.tight_layout()
     plot_and_save(plot_dir, 'madrl_rewards', fig)
 
-    # ROC curves: quality (K-Means vs DT-EKF) and anomaly (LOF vs DT-EKF)
-    fig, axes = plt.subplots(1, 2, figsize=(10, 4))
-    plot_roc_comparison(axes[0],
-                        baseline['km_fpr'],  baseline['km_tpr'],  baseline['km_auc'],
-                        dt_quality_m['fpr'], dt_quality_m['tpr'], dt_quality_m['auc'],
-                        f'Quality ROC — {dataset_name}\n(K-Means vs DT-EKF)')
-    plot_roc_comparison(axes[1],
-                        baseline['lof_fpr'],  baseline['lof_tpr'],  baseline['lof_auc'],
-                        dt_anomaly_m['fpr'],  dt_anomaly_m['tpr'],  dt_anomaly_m['auc'],
-                        f'Anomaly ROC — {dataset_name}\n(LOF vs DT-EKF)')
+    # ROC curves — quality (K-Means / GMM vs DT-EKF) and anomaly (LOF / Z-Score vs DT-EKF)
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+
+    ax = axes[0]
+    ax.plot(baseline['km_fpr'],  baseline['km_tpr'],  'b--', lw=1.5,
+            label=f'K-Means AUC={baseline["km_auc"]:.3f}')
+    ax.plot(baseline['gmm_fpr'], baseline['gmm_tpr'], 'g--', lw=1.5,
+            label=f'GMM AUC={baseline["gmm_auc"]:.3f}')
+    ax.plot(dt_quality_m['fpr'], dt_quality_m['tpr'], 'r-',  lw=2.0,
+            label=f'DT-EKF AUC={dt_quality_m["auc"]:.3f}')
+    ax.plot([0, 1], [0, 1], 'k:', lw=1)
+    ax.set_xlabel('False Positive Rate'); ax.set_ylabel('True Positive Rate')
+    ax.set_title(f'Quality ROC — {dataset_name}\n(K-Means / GMM vs DT-EKF)')
+    ax.legend(loc='lower right', fontsize=8)
+
+    ax = axes[1]
+    ax.plot(lof_fpr, lof_tpr, 'b--', lw=1.5,
+            label=f'LOF AUC={lof_auc:.3f}')
+    ax.plot(zs_fpr,  zs_tpr,  'g--', lw=1.5,
+            label=f'Z-Score AUC={zs_auc:.3f}')
+    ax.plot(dt_anomaly_m['fpr'], dt_anomaly_m['tpr'], 'r-', lw=2.0,
+            label=f'DT-EKF AUC={dt_anomaly_m["auc"]:.3f}')
+    ax.plot([0, 1], [0, 1], 'k:', lw=1)
+    ax.set_xlabel('False Positive Rate'); ax.set_ylabel('True Positive Rate')
+    ax.set_title(f'Anomaly ROC — {dataset_name}\n(LOF / Z-Score vs DT-EKF, fault-injection GT)')
+    ax.legend(loc='lower right', fontsize=8)
+
     plt.tight_layout()
     plot_and_save(plot_dir, 'roc_comparison', fig)
 
@@ -540,10 +601,13 @@ def generate_summary(all_results):
         rows.append({
             'Dataset':            ds,
             'KMeans Acc':         f"{m['baseline_kmeans']['accuracy']:.4f}",
+            'GMM Acc':            f"{m['baseline_gmm']['accuracy']:.4f}",
             'DT Acc':             f"{m['dt_quality']['accuracy']:.4f}",
             'KMeans AUC':         f"{m['baseline_kmeans']['auc']:.4f}",
+            'GMM AUC':            f"{m['baseline_gmm']['auc']:.4f}",
             'DT AUC':             f"{m['dt_quality']['auc']:.4f}",
             'LOF AUC':            f"{m['baseline_lof']['auc']:.4f}",
+            'ZScore AUC':         f"{m['baseline_zscore']['auc']:.4f}",
             'DT Anomaly AUC':     f"{m['dt_anomaly']['auc']:.4f}",
             'MADRL Avg Reward':   f"{m['madrl_train']['avg_reward_eval']:.2f}",
             'VAE MSE':            f"{m['vae']['mse']:.6f}",
