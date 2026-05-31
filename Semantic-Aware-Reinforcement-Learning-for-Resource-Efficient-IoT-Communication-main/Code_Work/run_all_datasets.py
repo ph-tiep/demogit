@@ -29,8 +29,9 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import torch
 from pathlib import Path
-from sklearn.ensemble import RandomForestClassifier, IsolationForest
-from sklearn.model_selection import train_test_split
+from sklearn.cluster import KMeans
+from sklearn.mixture import GaussianMixture
+from sklearn.neighbors import LocalOutlierFactor
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import accuracy_score, roc_auc_score, roc_curve
 
@@ -96,6 +97,73 @@ CFG = {
 # Helpers
 # ===========================================================================
 
+# ===========================================================================
+# Fault Injection — Anomaly Ground Truth
+# ===========================================================================
+
+def inject_anomalies(obs_seq, fraction=0.05, seed=42):
+    """
+    Inject synthetic faults into [mean_rssi, num_active_bs] sequence.
+    Three fault types:
+      spike : RSSI jumps far above normal range   (e.g. interference)
+      drop  : RSSI collapses to near-minimum      (e.g. connection loss)
+      stuck : num_active_bs drops to 0 suddenly   (e.g. sensor freeze)
+
+    Returns
+    -------
+    injected : np.ndarray [N, 2]  — modified observation sequence
+    y_fault  : np.ndarray [N]     — 1 = fault injected, 0 = normal
+    """
+    rng = np.random.RandomState(seed)
+    N = len(obs_seq)
+    n_faults = max(1, int(N * fraction))
+    fault_idx = np.sort(rng.choice(N, n_faults, replace=False))
+
+    injected = obs_seq.copy().astype(np.float64)
+    rssi = obs_seq[:, 0]
+    rssi_std = float(rssi.std()) + 1e-6
+    rssi_mean = float(rssi.mean())
+
+    fault_types = rng.choice(['spike', 'drop', 'stuck'], size=n_faults)
+    for i, ft in zip(fault_idx, fault_types):
+        if ft == 'spike':
+            injected[i, 0] = rssi_mean + 5.0 * rssi_std   # extreme high
+        elif ft == 'drop':
+            injected[i, 0] = rssi_mean - 5.0 * rssi_std   # extreme low
+            injected[i, 1] = 0.0                            # all BSs lost
+        else:  # stuck
+            injected[i, 0] = rssi_mean + 4.0 * rssi_std
+            injected[i, 1] = 0.0
+
+    y_fault = np.zeros(N, dtype=int)
+    y_fault[fault_idx] = 1
+    print(f"  Fault injection: {n_faults}/{N} samples "
+          f"({n_faults/N*100:.1f}%) — "
+          f"spike:{(fault_types=='spike').sum()} "
+          f"drop:{(fault_types=='drop').sum()} "
+          f"stuck:{(fault_types=='stuck').sum()}")
+    return injected.astype(np.float32), y_fault
+
+
+def rolling_zscore_anomaly(series, window=20):
+    """
+    Rolling Z-score anomaly score for a 1-D time series.
+    score[t] = |x[t] - mean(x[t-W:t])| / std(x[t-W:t])
+    Returns np.ndarray of anomaly scores (higher = more anomalous).
+    """
+    scores = np.zeros(len(series), dtype=np.float64)
+    for t in range(1, len(series)):
+        hist = series[max(0, t - window):t]
+        mu = hist.mean()
+        sigma = hist.std() + 1e-9
+        scores[t] = abs(series[t] - mu) / sigma
+    return scores
+
+
+# ===========================================================================
+# Helpers
+# ===========================================================================
+
 def save_json(data, path):
     """Recursively convert numpy types before JSON dump."""
     def _conv(obj):
@@ -109,53 +177,62 @@ def save_json(data, path):
         json.dump(_conv(data), f, indent=2)
 
 
-def baseline_rf_if(semantic_df, quality_labels, test_size=0.3):
-    """Run baseline RF + IF and return metrics."""
+def baseline_unsupervised(semantic_df, quality_labels):
+    """
+    Unsupervised baseline (no label used during fitting):
+      - K-Means (k=2) for quality classification
+      - LOF (Local Outlier Factor) for anomaly detection
+    Both are fully unsupervised — fair comparison with the proposed DT-EKF.
+    """
     features = [c for c in ['mean_rssi', 'num_active_bs', 'Latitude', 'Longitude', 'hour']
                 if c in semantic_df.columns]
     scaler = MinMaxScaler()
     X = scaler.fit_transform(semantic_df[features].values)
-    y = quality_labels  # use pre-computed adaptive labels
+    y_true = quality_labels
 
-    X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=test_size,
-                                               random_state=42)
-    # Random Forest
-    rf = RandomForestClassifier(n_estimators=100, random_state=42)
-    rf.fit(X_tr, y_tr)
-    y_pred = rf.predict(X_te)
-    rf_acc = accuracy_score(y_te, y_pred)
-    proba = rf.predict_proba(X_te)
-    if proba.shape[1] >= 2:
-        y_prob = proba[:, 1]
-    else:
-        y_prob = proba[:, 0]
+    # ── K-Means quality classification ────────────────────────────────────
+    km = KMeans(n_clusters=2, random_state=42, n_init=10)
+    km_labels = km.fit_predict(X)
+
+    # Identify which cluster = "good": cluster with higher mean raw RSSI
+    rssi_raw = semantic_df['mean_rssi'].values
+    c0_rssi = rssi_raw[km_labels == 0].mean()
+    c1_rssi = rssi_raw[km_labels == 1].mean()
+    good_cluster = 0 if c0_rssi > c1_rssi else 1
+    km_quality = (km_labels == good_cluster).astype(int)
+
+    km_acc = accuracy_score(y_true, km_quality)
+    # Confidence: distance to centroid of good cluster (inverse → closer = more confident)
+    dist_to_good = np.linalg.norm(X - km.cluster_centers_[good_cluster], axis=1)
+    km_conf = 1.0 / (1.0 + dist_to_good)
     try:
-        rf_auc = roc_auc_score(y_te, y_prob)
-        rf_fpr, rf_tpr, _ = roc_curve(y_te, y_prob)
+        km_auc = roc_auc_score(y_true, km_conf)
+        km_fpr, km_tpr, _ = roc_curve(y_true, km_conf)
     except ValueError:
-        rf_auc = 0.5
-        rf_fpr, rf_tpr = np.array([0, 1]), np.array([0, 1])
+        km_auc = 0.5
+        km_fpr, km_tpr = np.array([0, 1]), np.array([0, 1])
 
-    # Isolation Forest
-    iso = IsolationForest(n_estimators=100, contamination=0.05, random_state=42)
-    iso_labels = iso.fit_predict(X)
-    y_anom = (iso_labels == -1).astype(int)
-    iso_scores = -iso.decision_function(X)
+    # ── LOF anomaly detection ──────────────────────────────────────────────
+    lof = LocalOutlierFactor(n_neighbors=20, contamination=0.05, novelty=False)
+    lof_pred = lof.fit_predict(X)          # 1 = normal, -1 = anomaly
+    y_anom = (lof_pred == -1).astype(int)  # 1 = anomaly, 0 = normal
+    lof_scores = -lof.negative_outlier_factor_  # higher = more anomalous
+
     try:
-        iso_auc = roc_auc_score(y_anom, iso_scores)
-        iso_fpr, iso_tpr, _ = roc_curve(y_anom, iso_scores)
+        lof_auc = roc_auc_score(y_anom, lof_scores)
+        lof_fpr, lof_tpr, _ = roc_curve(y_anom, lof_scores)
     except ValueError:
-        iso_auc = 0.5
-        iso_fpr, iso_tpr = np.array([0, 1]), np.array([0, 1])
+        lof_auc = 0.5
+        lof_fpr, lof_tpr = np.array([0, 1]), np.array([0, 1])
 
-    print(f"  [Baseline RF]  Acc={rf_acc:.4f}  AUC={rf_auc:.4f}")
-    print(f"  [Baseline IF]  AUC={iso_auc:.4f}")
+    print(f"  [Baseline K-Means]  Acc={km_acc:.4f}  AUC={km_auc:.4f}")
+    print(f"  [Baseline LOF]      AUC={lof_auc:.4f}")
 
     return {
-        'rf_acc': rf_acc, 'rf_auc': rf_auc,
-        'rf_fpr': rf_fpr, 'rf_tpr': rf_tpr,
-        'iso_auc': iso_auc, 'iso_fpr': iso_fpr, 'iso_tpr': iso_tpr,
-        'y_anom': y_anom,   # anomaly pseudo-labels for DT comparison
+        'km_acc': km_acc,  'km_auc': km_auc,
+        'km_fpr': km_fpr,  'km_tpr': km_tpr,
+        'lof_auc': lof_auc, 'lof_fpr': lof_fpr, 'lof_tpr': lof_tpr,
+        'y_anom': y_anom,   # LOF pseudo-labels used by DT evaluation
     }
 
 
@@ -214,10 +291,10 @@ def run_experiment(dataset_name, semantic_df, vae_X_norm, vae_input_dim,
         dt_rssi_thresh = -110.0
         dt_bs_thresh   = 3 if semantic_df['num_active_bs'].max() > 1 else 1
 
-    # ── 1. Baseline ────────────────────────────────────────────────────────
-    print("\n[1/4] Baseline RF + IF ...")
-    baseline = baseline_rf_if(semantic_df, quality_labels)
-    y_anom_true = baseline['y_anom']
+    # ── 1. Baseline (unsupervised) ─────────────────────────────────────────
+    print("\n[1/4] Baseline K-Means + LOF (unsupervised) ...")
+    baseline = baseline_unsupervised(semantic_df, quality_labels)
+    y_anom_true = baseline['y_anom']  # LOF pseudo-labels
 
     # ── 2. VAE ────────────────────────────────────────────────────────────
     print("\n[2/4] Training VAE ...")
@@ -294,9 +371,9 @@ def run_experiment(dataset_name, semantic_df, vae_X_norm, vae_input_dim,
 
     # ── Build comparison table ─────────────────────────────────────────────
     baseline_agg = {
-        'quality_accuracy': baseline['rf_acc'],
-        'quality_auc':      baseline['rf_auc'],
-        'anomaly_auc':      baseline['iso_auc'],
+        'quality_accuracy': baseline['km_acc'],
+        'quality_auc':      baseline['km_auc'],
+        'anomaly_auc':      baseline['lof_auc'],
         'avg_reward':       float(np.mean(ep_rewards[:5])),   # first-5 episodes (untrained)
     }
     proposed_agg = {
@@ -317,8 +394,8 @@ def run_experiment(dataset_name, semantic_df, vae_X_norm, vae_input_dim,
         'madrl_train':   {'avg_reward_last20': float(np.mean(ep_rewards[-20:])),
                           'avg_reward_eval':   float(np.mean(eval_rewards)),
                           'std_reward_eval':   float(np.std(eval_rewards))},
-        'baseline_rf':   {'accuracy': baseline['rf_acc'], 'auc': baseline['rf_auc']},
-        'baseline_if':   {'auc': baseline['iso_auc']},
+        'baseline_kmeans': {'accuracy': baseline['km_acc'],  'auc': baseline['km_auc']},
+        'baseline_lof':    {'auc': baseline['lof_auc']},
         'comparison':    comp,
     }
     save_json(all_metrics, res_dir / 'metrics.json')
@@ -346,16 +423,16 @@ def run_experiment(dataset_name, semantic_df, vae_X_norm, vae_input_dim,
     plt.tight_layout()
     plot_and_save(plot_dir, 'madrl_rewards', fig)
 
-    # ROC curves: quality
+    # ROC curves: quality (K-Means vs DT-EKF) and anomaly (LOF vs DT-EKF)
     fig, axes = plt.subplots(1, 2, figsize=(10, 4))
     plot_roc_comparison(axes[0],
-                        baseline['rf_fpr'], baseline['rf_tpr'], baseline['rf_auc'],
+                        baseline['km_fpr'],  baseline['km_tpr'],  baseline['km_auc'],
                         dt_quality_m['fpr'], dt_quality_m['tpr'], dt_quality_m['auc'],
-                        f'Quality Classification ROC — {dataset_name}')
+                        f'Quality ROC — {dataset_name}\n(K-Means vs DT-EKF)')
     plot_roc_comparison(axes[1],
-                        baseline['iso_fpr'], baseline['iso_tpr'], baseline['iso_auc'],
-                        dt_anomaly_m['fpr'], dt_anomaly_m['tpr'], dt_anomaly_m['auc'],
-                        f'Anomaly Detection ROC — {dataset_name}')
+                        baseline['lof_fpr'],  baseline['lof_tpr'],  baseline['lof_auc'],
+                        dt_anomaly_m['fpr'],  dt_anomaly_m['tpr'],  dt_anomaly_m['auc'],
+                        f'Anomaly ROC — {dataset_name}\n(LOF vs DT-EKF)')
     plt.tight_layout()
     plot_and_save(plot_dir, 'roc_comparison', fig)
 
@@ -461,15 +538,15 @@ def generate_summary(all_results):
     rows = []
     for ds, m in all_results.items():
         rows.append({
-            'Dataset':           ds,
-            'RF Acc':            f"{m['baseline_rf']['accuracy']:.4f}",
-            'DT Acc':            f"{m['dt_quality']['accuracy']:.4f}",
-            'RF AUC':            f"{m['baseline_rf']['auc']:.4f}",
-            'DT AUC':            f"{m['dt_quality']['auc']:.4f}",
-            'IF AUC':            f"{m['baseline_if']['auc']:.4f}",
-            'DT Anomaly AUC':    f"{m['dt_anomaly']['auc']:.4f}",
-            'MADRL Avg Reward':  f"{m['madrl_train']['avg_reward_eval']:.2f}",
-            'VAE MSE':           f"{m['vae']['mse']:.6f}",
+            'Dataset':            ds,
+            'KMeans Acc':         f"{m['baseline_kmeans']['accuracy']:.4f}",
+            'DT Acc':             f"{m['dt_quality']['accuracy']:.4f}",
+            'KMeans AUC':         f"{m['baseline_kmeans']['auc']:.4f}",
+            'DT AUC':             f"{m['dt_quality']['auc']:.4f}",
+            'LOF AUC':            f"{m['baseline_lof']['auc']:.4f}",
+            'DT Anomaly AUC':     f"{m['dt_anomaly']['auc']:.4f}",
+            'MADRL Avg Reward':   f"{m['madrl_train']['avg_reward_eval']:.2f}",
+            'VAE MSE':            f"{m['vae']['mse']:.6f}",
         })
     df = pd.DataFrame(rows).set_index('Dataset')
     print("\n" + "="*80)
