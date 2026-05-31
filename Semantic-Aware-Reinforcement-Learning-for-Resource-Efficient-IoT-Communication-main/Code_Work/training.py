@@ -17,10 +17,15 @@ MEMORY_CAPACITY = 10000
 LR = 1e-3
 
 def reward_function(state, action):
-    """Simple reward function"""
-    mean_rssi = state[0]
-    num_active = state[1]
-    return mean_rssi * 10 + num_active * 5 - action
+    """Normalised reward: quality - resource_cost (consistent with MADRL)."""
+    mean_rssi = float(state[0])
+    num_active = float(state[1])
+    RSSI_MIN, RSSI_MAX = -145.0, -50.0
+    norm_rssi = max(0.0, min(1.0, (mean_rssi - RSSI_MIN) / (RSSI_MAX - RSSI_MIN)))
+    quality      = norm_rssi * 5.0
+    connectivity = min(num_active / 20.0, 1.0) * 2.0
+    resource_cost = (action / 4.0) * 3.0
+    return quality + connectivity - resource_cost
 
 def select_action(state, policy_net, num_actions, eps, device):
     if random.random() < eps:

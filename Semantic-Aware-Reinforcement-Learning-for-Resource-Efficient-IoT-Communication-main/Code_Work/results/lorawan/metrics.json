@@ -1,0 +1,57 @@
+{
+  "vae": {
+    "mse": 0.015991780906915665,
+    "mae": 0.09614671021699905,
+    "kl_divergence": 7.391211198637393e-08
+  },
+  "dt_quality": {
+    "accuracy": 0.47934404888137655,
+    "auc": 0.9076929188393559,
+    "rssi_rmse": 6.715487037656866,
+    "bs_rmse": 0.0
+  },
+  "dt_anomaly": {
+    "accuracy": 0.21411848694501895,
+    "auc": 0.9159055273826616
+  },
+  "madrl_train": {
+    "avg_reward_last20": 2192.3006927068127,
+    "avg_reward_eval": 2519.2631578947357,
+    "std_reward_eval": 4.547473508864641e-13
+  },
+  "baseline_rf": {
+    "accuracy": 1.0,
+    "auc": 1.0
+  },
+  "baseline_if": {
+    "auc": 1.0
+  },
+  "comparison": {
+    "lorawan": {
+      "quality_accuracy": {
+        "baseline": 1.0,
+        "proposed": 0.47934404888137655,
+        "delta": -0.5206559511186235,
+        "pct_change": -52.06559511186235
+      },
+      "quality_auc": {
+        "baseline": 1.0,
+        "proposed": 0.9076929188393559,
+        "delta": -0.09230708116064412,
+        "pct_change": -9.230708116064413
+      },
+      "anomaly_auc": {
+        "baseline": 1.0,
+        "proposed": 0.9159055273826616,
+        "delta": -0.08409447261733838,
+        "pct_change": -8.409447261733838
+      },
+      "avg_reward": {
+        "baseline": 1521.3607428111632,
+        "proposed": 2519.2631578947357,
+        "delta": 997.9024150835726,
+        "pct_change": 65.5927543680175
+      }
+    }
+  }
+}
