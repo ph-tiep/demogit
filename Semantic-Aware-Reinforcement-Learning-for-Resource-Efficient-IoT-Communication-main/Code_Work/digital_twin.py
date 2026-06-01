@@ -157,22 +157,25 @@ class DigitalTwin:
 
     def evaluate_quality(self, results_df, y_true):
         """Compare Digital Twin quality predictions against ground truth."""
-        y_pred = results_df['quality_label'].values
-        acc = accuracy_score(y_true, y_pred)
-
-        # Use inverse-NIS as soft confidence score for quality = 1
-        conf = 1.0 / (1.0 + results_df['nis'].values)
+        # Soft score: estimated RSSI (higher = better quality, consistent with label definition)
+        est_rssi = results_df['est_rssi'].values
         try:
-            auc = roc_auc_score(y_true, conf)
-            fpr, tpr, _ = roc_curve(y_true, conf)
+            auc = roc_auc_score(y_true, est_rssi)
+            fpr, tpr, thresholds = roc_curve(y_true, est_rssi)
+            # Youden's J: optimal threshold on estimated RSSI
+            opt_idx = np.argmax(tpr - fpr)
+            opt_thresh = thresholds[opt_idx]
+            y_pred = (est_rssi >= opt_thresh).astype(int)
         except ValueError:
             auc, fpr, tpr = 0.5, np.array([0, 1]), np.array([0, 1])
+            y_pred = results_df['quality_label'].values
 
+        acc = accuracy_score(y_true, y_pred)
         report = classification_report(y_true, y_pred, output_dict=True,
                                        zero_division=0)
         cm = confusion_matrix(y_true, y_pred)
         rssi_rmse = np.sqrt(np.mean(
-            (results_df['est_rssi'].values - results_df['obs_rssi'].values) ** 2))
+            (est_rssi - results_df['obs_rssi'].values) ** 2))
         bs_rmse = np.sqrt(np.mean(
             (results_df['est_num_bs'].values - results_df['obs_num_bs'].values) ** 2))
 

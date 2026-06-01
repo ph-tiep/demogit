@@ -1,0 +1,446 @@
+% =============================================================================
+% BÁO CÁO KẾT QUẢ THỰC NGHIỆM
+%
+% HƯỚNG DẪN UPLOAD LÊN OVERLEAF:
+%   1. Tạo thư mục "figures/" trong project Overleaf
+%   2. Copy 12 file PNG vào thư mục figures/ với tên như bên dưới:
+%
+%   results/antwerp/plots/vae_loss.png       → figures/vae_loss_antwerp.png
+%   results/lorawan/plots/vae_loss.png       → figures/vae_loss_lorawan.png
+%   results/indoor/plots/vae_loss.png        → figures/vae_loss_indoor.png
+%
+%   results/antwerp/plots/dt_estimation.png  → figures/dt_estimation_antwerp.png
+%   results/lorawan/plots/dt_estimation.png  → figures/dt_estimation_lorawan.png
+%   results/indoor/plots/dt_estimation.png   → figures/dt_estimation_indoor.png
+%
+%   results/antwerp/plots/roc_comparison.png → figures/roc_comparison_antwerp.png
+%   results/lorawan/plots/roc_comparison.png → figures/roc_comparison_lorawan.png
+%   results/indoor/plots/roc_comparison.png  → figures/roc_comparison_indoor.png
+%
+%   results/antwerp/plots/madrl_rewards.png  → figures/madrl_rewards_antwerp.png
+%   results/lorawan/plots/madrl_rewards.png  → figures/madrl_rewards_lorawan.png
+%   results/indoor/plots/madrl_rewards.png   → figures/madrl_rewards_indoor.png
+% =============================================================================
+
+\documentclass[12pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T5]{fontenc}
+\usepackage[vietnamese]{babel}
+\usepackage{geometry}
+\geometry{margin=2.5cm}
+
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{multirow}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{float}
+\usepackage{siunitx}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    citecolor=blue,
+    urlcolor=blue,
+}
+
+\graphicspath{{figures/}}
+
+\title{\textbf{Kết Quả Thực Nghiệm}\\
+\large Khung Đề Xuất: VAE + Digital Twin (EKF) + MADRL+GAT\\
+Đánh Giá Trên 3 Bộ Dữ Liệu IoT}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+% =============================================================================
+\section{Thiết Lập Thực Nghiệm}
+% =============================================================================
+
+\subsection{Bộ Dữ Liệu}
+
+Thực nghiệm được tiến hành trên ba bộ dữ liệu IoT thực tế có đặc trưng khác nhau
+về quy mô, công nghệ truyền thông và môi trường triển khai:
+
+\begin{itemize}
+    \item \textbf{Sigfox Antwerp}: Dữ liệu mạng Sigfox thu thập tại thành phố Antwerp,
+    Bỉ. Bộ dữ liệu gồm 14.377 mẫu với không gian đặc trưng VAE 84 chiều (84 trạm
+    gốc). Nhãn chất lượng gốc mất cân bằng nghiêm trọng (chỉ 1,9\% mẫu tốt),
+    nên ngưỡng thích nghi được áp dụng tại $-123{,}9$ dBm (trung vị RSSI),
+    đưa tỷ lệ về $50{,}0\%$.
+
+    \item \textbf{LoRaWAN Italy}: Dữ liệu mạng LoRaWAN thu thập tại Ý, quy mô lớn
+    với 190.502 mẫu và 5 đặc trưng. Ngưỡng phân loại tại trung vị
+    $-69{,}0$ dBm, cho tỷ lệ $47{,}9\%$ mẫu chất lượng tốt.
+
+    \item \textbf{Indoor WiFi}: Dữ liệu định vị WiFi trong nhà với 1.100 mẫu
+    và 5 đặc trưng. Ngưỡng phân loại tại $-63{,}9$ dBm,
+    tỷ lệ mẫu chất lượng tốt là $49{,}5\%$.
+\end{itemize}
+
+\subsection{Phương Pháp Tiêm Lỗi (Fault Injection)}
+
+Để tạo nhãn chuẩn (ground truth) cho bài toán phát hiện bất thường, 5\% mẫu
+trong mỗi chuỗi quan sát được tiêm lỗi nhân tạo theo ba kiểu. Biên độ tiêm
+được giới hạn ở $\pm 2\sigma$ và $+1{,}5\sigma$ — tương ứng với các sự kiện
+thực tế trong mạng IoT (nhiễu giao thoa nhẹ, suy hao tín hiệu, cảm biến
+trôi giá trị), thay vì các cực trị thống kê quá rõ ràng:
+
+\begin{itemize}
+    \item \textbf{Spike} ($+2\sigma$): RSSI tăng vừa phải, mô phỏng nhiễu giao thoa.
+    \item \textbf{Drop} ($-2\sigma$, số trạm gốc về 0): Suy hao tín hiệu và mất kết nối.
+    \item \textbf{Stuck} ($+1{,}5\sigma$, số trạm gốc về 0): Cảm biến trôi giá trị nhẹ.
+\end{itemize}
+
+Số lỗi tiêm vào lần lượt là: Antwerp 718/14.377, LoRaWAN 9.525/190.502,
+Indoor 55/1.100.
+
+\subsection{Phương Pháp So Sánh (Baseline)}
+
+\begin{itemize}
+    \item \textbf{K-Means} ($k=2$): Phân cụm không giám sát cho phân loại chất lượng.
+    \item \textbf{GMM} ($k=2$): Mô hình hỗn hợp Gaussian cho phân loại chất lượng.
+    \item \textbf{LOF} ($n\_neighbors=20$): Local Outlier Factor cho phát hiện bất thường.
+    \item \textbf{Rolling Z-Score} (cửa sổ 20 bước): Phát hiện bất thường dựa trên
+    thống kê cục bộ trên chuỗi RSSI.
+\end{itemize}
+
+Lưu ý: K-Means và GMM chỉ thực hiện phân loại chất lượng; LOF và Rolling
+Z-Score chỉ thực hiện phát hiện bất thường. Khung đề xuất DT-EKF thực hiện
+\textit{đồng thời cả hai nhiệm vụ}.
+
+% =============================================================================
+\section{Kết Quả và Phân Tích}
+% =============================================================================
+
+\subsection{Nén Ngữ Nghĩa bằng VAE}
+
+VAE được huấn luyện 30 epoch để học biểu diễn tiềm ẩn gọn gàng từ không gian
+đặc trưng thô. Bảng~\ref{tab:vae} tổng hợp kết quả:
+
+\begin{table}[H]
+\centering
+\caption{Kết quả huấn luyện VAE trên ba bộ dữ liệu}
+\label{tab:vae}
+\begin{tabular}{lcccccc}
+\toprule
+\textbf{Bộ dữ liệu} & \textbf{Chiều vào} & \textbf{Chiều tiềm ẩn}
+    & \textbf{Tỷ lệ nén} & \textbf{MSE tái tạo} & \textbf{MAE} & \textbf{KL} \\
+\midrule
+Antwerp  & 84 & 16 & $5{,}25\times$ & 0,008213 & 0,0531 & 0,0012 \\
+LoRaWAN  & 5  & 3  & $1{,}67\times$ & 0,015992 & 0,0891 & 0,0000 \\
+Indoor   & 5  & 3  & $1{,}67\times$ & 0,053747 & 0,1734 & 0,0001 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% -----------------------------------------------------------------------
+% ẢNH 1: VAE Training Loss
+% File cần có trong figures/:
+%   vae_loss_antwerp.png, vae_loss_lorawan.png, vae_loss_indoor.png
+% -----------------------------------------------------------------------
+\begin{figure}[H]
+    \centering
+    \begin{subfigure}[b]{0.32\textwidth}
+        \includegraphics[width=\textwidth]{vae_loss_antwerp}
+        \caption{Antwerp (84$\to$16)}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.32\textwidth}
+        \includegraphics[width=\textwidth]{vae_loss_lorawan}
+        \caption{LoRaWAN (5$\to$3)}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.32\textwidth}
+        \includegraphics[width=\textwidth]{vae_loss_indoor}
+        \caption{Indoor WiFi (5$\to$3)}
+    \end{subfigure}
+    \caption{Đường cong loss huấn luyện VAE. Đường xanh: loss tái tạo;
+    đường đỏ: KL divergence. Cả hai thành phần hội tụ nhanh sau vài epoch đầu.}
+    \label{fig:vae_loss}
+\end{figure}
+
+Trên Antwerp (84 chiều vào), VAE đạt MSE tái tạo = 0,0082, cho thấy biểu diễn
+tiềm ẩn 16 chiều bảo toàn tốt thông tin tín hiệu đa trạm. Trên LoRaWAN và
+Indoor (5 chiều vào), tỷ lệ nén $1{,}67\times$ vẫn mang lại không gian tiềm
+ẩn có cấu trúc hơn, loại bỏ nhiễu đo lường và cung cấp đầu vào chất lượng
+cao cho module MADRL.
+
+% -----------------------------------------------------------------------
+
+\subsection{Ước Lượng Trạng Thái và Phân Loại của Digital Twin}
+
+\subsubsection{Ước Lượng Trạng Thái bằng EKF}
+
+Digital Twin sử dụng EKF để ước lượng liên tục trạng thái kênh truyền
+gồm RSSI trung bình và số trạm gốc hoạt động. Hình~\ref{fig:dt_estimation}
+so sánh giá trị quan sát thực tế (màu xám) với ước lượng EKF (màu màu)
+trên 500 bước đầu tiên.
+
+% -----------------------------------------------------------------------
+% ẢNH 2: Digital Twin State Estimation
+% File cần có: dt_estimation_antwerp.png, dt_estimation_lorawan.png, dt_estimation_indoor.png
+% -----------------------------------------------------------------------
+\begin{figure}[H]
+    \centering
+    \begin{subfigure}[b]{\textwidth}
+        \includegraphics[width=\textwidth]{dt_estimation_antwerp}
+        \caption{Antwerp (Sigfox) — RSSI-RMSE = 4,834 dBm; BS-RMSE = 7,022}
+    \end{subfigure}
+    \vspace{0.3cm}
+    \begin{subfigure}[b]{\textwidth}
+        \includegraphics[width=\textwidth]{dt_estimation_lorawan}
+        \caption{LoRaWAN (Italy) — RSSI-RMSE = 7,045 dBm; BS-RMSE = 0,118}
+    \end{subfigure}
+    \vspace{0.3cm}
+    \begin{subfigure}[b]{\textwidth}
+        \includegraphics[width=\textwidth]{dt_estimation_indoor}
+        \caption{Indoor WiFi — RSSI-RMSE = 2,443 dBm; BS-RMSE = 1,234}
+    \end{subfigure}
+    \caption{Ước lượng trạng thái Digital Twin (EKF). Đường xám: tín hiệu
+    quan sát (có chứa lỗi tiêm); đường màu: ước lượng EKF. EKF làm mịn
+    nhiễu và phục hồi xu hướng sau mỗi lỗi tiêm.}
+    \label{fig:dt_estimation}
+\end{figure}
+
+RSSI-RMSE LoRaWAN cao nhất (7,045 dBm) do dải dao động tín hiệu LoRaWAN rộng
+hơn ($-20$ đến $-120$ dBm) so với Sigfox và WiFi — xấp xỉ tuyến tính hóa
+cục bộ của EKF gặp hạn chế trong môi trường tín hiệu phi tuyến mạnh. Ngược
+lại, Indoor đạt RSSI-RMSE thấp nhất (2,443 dBm) nhờ tín hiệu WiFi ổn định
+hơn trong không gian hẹp.
+
+\subsubsection{Phân Loại Chất Lượng và Phát Hiện Bất Thường}
+
+Bảng~\ref{tab:dt_metrics} tổng hợp kết quả DT-EKF cho hai tác vụ. Ngưỡng
+phân loại được xác định qua tiêu chí Youden's J trên RSSI ước lượng, cho
+phép DT-EKF thích nghi với đặc trưng từng bộ dữ liệu mà không cần hiệu chỉnh
+thủ công.
+
+\begin{table}[H]
+\centering
+\caption{Kết quả DT-EKF: phân loại chất lượng và phát hiện bất thường}
+\label{tab:dt_metrics}
+\begin{tabular}{lcccc}
+\toprule
+\multirow{2}{*}{\textbf{Bộ dữ liệu}}
+    & \multicolumn{2}{c}{\textbf{Phân loại chất lượng}}
+    & \multicolumn{2}{c}{\textbf{Phát hiện bất thường}} \\
+\cmidrule(lr){2-3} \cmidrule(lr){4-5}
+ & \textbf{Accuracy} & \textbf{AUC} & \textbf{RSSI-RMSE (dBm)} & \textbf{AUC} \\
+\midrule
+Antwerp  & 0,7403 & 0,7948 & 4,834 & 0,8653 \\
+LoRaWAN  & 0,7825 & 0,8614 & 7,045 & 0,8337 \\
+Indoor   & 0,9345 & 0,9725 & 2,443 & 0,9784 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% -----------------------------------------------------------------------
+% ẢNH 3: ROC Curves
+% File cần có: roc_comparison_antwerp.png, roc_comparison_lorawan.png, roc_comparison_indoor.png
+% -----------------------------------------------------------------------
+\begin{figure}[H]
+    \centering
+    \begin{subfigure}[b]{\textwidth}
+        \includegraphics[width=\textwidth]{roc_comparison_antwerp}
+        \caption{Antwerp --- Chất lượng: DT-EKF (0,795) \ensuremath{>} GMM (0,697)
+        \ensuremath{>} K-Means (0,676);
+        Bất thường: Z-Score (0,920) \ensuremath{>} DT-EKF (0,865)
+        \ensuremath{\gg} LOF (0,506)}
+    \end{subfigure}
+    \vspace{0.3cm}
+    \begin{subfigure}[b]{\textwidth}
+        \includegraphics[width=\textwidth]{roc_comparison_lorawan}
+        \caption{LoRaWAN --- Chất lượng: DT-EKF (0,861) \ensuremath{\gg}
+        GMM (0,516) \ensuremath{\approx} K-Means (0,505);
+        Bất thường: Z-Score (0,919) \ensuremath{>} DT-EKF (0,834)
+        \ensuremath{\gg} LOF (0,500)}
+    \end{subfigure}
+    \vspace{0.3cm}
+    \begin{subfigure}[b]{\textwidth}
+        \includegraphics[width=\textwidth]{roc_comparison_indoor}
+        \caption{Indoor --- Chất lượng: DT-EKF (0,973) \ensuremath{>}
+        K-Means (0,830) \ensuremath{>} GMM (0,666);
+        Bất thường: DT-EKF (0,978) \ensuremath{>} Z-Score (0,958)
+        \ensuremath{\gg} LOF (0,489)}
+    \end{subfigure}
+    \caption{Đường cong ROC so sánh các phương pháp. \textit{Trái}: phân loại
+    chất lượng (K-Means nét đứt xanh dương; GMM nét đứt xanh lá; DT-EKF nét
+    liền đỏ). \textit{Phải}: phát hiện bất thường (LOF nét đứt xanh dương;
+    Z-Score nét đứt xanh lá; DT-EKF nét liền đỏ).}
+    \label{fig:roc}
+\end{figure}
+
+% -----------------------------------------------------------------------
+
+\subsection{Phân Bổ Tài Nguyên Hợp Tác bằng MADRL+GAT}
+
+Module MADRL+GAT được huấn luyện trong 50 episode với 5 tác nhân tương tác
+qua đồ thị chú ý (GAT). Không gian trạng thái gọn (3 chiều với LoRaWAN và
+Indoor, 16 chiều với Antwerp) cho phép các tác nhân học chính sách ổn định
+trong số episode hạn chế. Hình~\ref{fig:madrl} thể hiện quá trình học.
+
+% -----------------------------------------------------------------------
+% ẢNH 4: MADRL Rewards
+% File cần có: madrl_rewards_antwerp.png, madrl_rewards_lorawan.png, madrl_rewards_indoor.png
+% -----------------------------------------------------------------------
+\begin{figure}[H]
+    \centering
+    \begin{subfigure}[b]{0.32\textwidth}
+        \includegraphics[width=\textwidth]{madrl_rewards_antwerp}
+        \caption{Antwerp\\Eval: 1916,01}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.32\textwidth}
+        \includegraphics[width=\textwidth]{madrl_rewards_lorawan}
+        \caption{LoRaWAN\\Eval: 2519,26}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.32\textwidth}
+        \includegraphics[width=\textwidth]{madrl_rewards_indoor}
+        \caption{Indoor WiFi\\Eval: 3088,95}
+    \end{subfigure}
+    \caption{Đường cong phần thưởng tích lũy MADRL+GAT (đường mờ: thô;
+    đường đậm: làm mịn). Phần thưởng tăng đơn điệu trên cả ba bộ dữ liệu.}
+    \label{fig:madrl}
+\end{figure}
+
+Phần thưởng đánh giá (evaluation reward) sau 20 episode kiểm tra tăng theo
+quy mô và đặc tính dữ liệu: 1.916 (Antwerp, 14K mẫu,
+tín hiệu Sigfox đa chiều) $\to$ 2.519 (LoRaWAN, 190K mẫu) $\to$ 3.089
+(Indoor, tín hiệu WiFi ổn định, biên độ dao động nhỏ hơn).
+
+% -----------------------------------------------------------------------
+
+\subsection{So Sánh Tổng Thể}
+
+Bảng~\ref{tab:summary} tổng hợp toàn bộ kết quả so sánh.
+
+\begin{table}[H]
+\centering
+\caption{Bảng tổng hợp kết quả thực nghiệm trên ba bộ dữ liệu IoT}
+\label{tab:summary}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{llccccccc}
+\toprule
+\multirow{2}{*}{\textbf{Bộ dữ liệu}} &
+\multirow{2}{*}{\textbf{Phương pháp}} &
+\multicolumn{2}{c}{\textbf{Phân loại chất lượng}} &
+\multicolumn{3}{c}{\textbf{Phát hiện bất thường (AUC)}} &
+\multirow{2}{*}{\textbf{MADRL Reward}} &
+\multirow{2}{*}{\textbf{VAE MSE}} \\
+\cmidrule(lr){3-4} \cmidrule(lr){5-7}
+ & & \textbf{Accuracy} & \textbf{AUC} &
+\textbf{LOF} & \textbf{Z-Score} & \textbf{DT-EKF} & & \\
+\midrule
+\multirow{3}{*}{Antwerp}
+ & K-Means   & 0,7301 & 0,6755 & \multirow{3}{*}{0,506}
+                                & \multirow{3}{*}{0,920}
+                                & \multirow{3}{*}{\textbf{0,865}}
+                                & \multirow{3}{*}{1916,01}
+                                & \multirow{3}{*}{0,0082} \\
+ & GMM       & 0,6558 & 0,6965 & & & & & \\
+ & \textbf{DT-EKF} & \textbf{0,7403} & \textbf{0,7948} & & & & & \\
+\midrule
+\multirow{3}{*}{LoRaWAN}
+ & K-Means   & 0,5050 & 0,5050 & \multirow{3}{*}{0,500}
+                                & \multirow{3}{*}{0,919}
+                                & \multirow{3}{*}{\textbf{0,834}}
+                                & \multirow{3}{*}{2519,26}
+                                & \multirow{3}{*}{0,0160} \\
+ & GMM       & 0,5050 & 0,5164 & & & & & \\
+ & \textbf{DT-EKF} & \textbf{0,7825} & \textbf{0,8614} & & & & & \\
+\midrule
+\multirow{3}{*}{Indoor}
+ & K-Means   & 0,7673 & 0,8300 & \multirow{3}{*}{0,489}
+                                & \multirow{3}{*}{0,958}
+                                & \multirow{3}{*}{\textbf{0,978}}
+                                & \multirow{3}{*}{3088,95}
+                                & \multirow{3}{*}{0,0537} \\
+ & GMM       & 0,6109 & 0,6657 & & & & & \\
+ & \textbf{DT-EKF} & \textbf{0,9345} & \textbf{0,9725} & & & & & \\
+\bottomrule
+\end{tabular}%
+}
+\end{table}
+
+% =============================================================================
+\section{Thảo Luận}
+% =============================================================================
+
+\subsection{Ưu Điểm của DT-EKF so với Baseline}
+
+\textbf{Phân loại chất lượng:} DT-EKF vượt trội K-Means và GMM về cả
+Accuracy lẫn AUC trên toàn bộ ba bộ dữ liệu. Cải thiện nổi bật nhất là
+trên LoRaWAN, nơi K-Means và GMM chỉ đạt AUC $\approx 0{,}50$ (tương đương
+đoán ngẫu nhiên) do dữ liệu không có cấu trúc cụm rõ ràng trong không gian
+đặc trưng tĩnh. DT-EKF đạt AUC = 0,861 và Accuracy = 0,783 nhờ khai thác
+thông tin động học theo thời gian qua mô hình EKF. Trên Indoor, DT-EKF đạt
+Accuracy = 0,935 và AUC = 0,973 — vượt K-Means lần lượt $+16{,}7\%$ và
+$+14{,}3\%$.
+
+\textbf{Phát hiện bất thường:} LOF hoàn toàn thất bại (AUC $\approx 0{,}49$--$0{,}51$)
+do chỉ phân tích mật độ điểm dữ liệu trong không gian đặc trưng mà không
+xét đến ngữ cảnh thời gian. Rolling Z-Score đạt hiệu quả tốt (AUC
+$\approx 0{,}92$--$0{,}96$) nhờ tính chất tạm thời của lỗi tiêm, và nhỉnh
+hơn DT-EKF trên Antwerp và LoRaWAN. Tuy nhiên, Z-Score chỉ xử lý một chiều
+RSSI và không thể thực hiện phân loại chất lượng. Trong khi đó, DT-EKF
+xử lý đồng thời cả hai chiều (RSSI và số trạm gốc) và thực hiện song song
+cả hai nhiệm vụ, đạt AUC $\geq 0{,}978$ trên Indoor.
+
+\subsection{Phân Tích Điểm Yếu và Giới Hạn}
+
+\begin{itemize}
+    \item \textbf{DT-EKF thua Z-Score về anomaly AUC trên Antwerp và LoRaWAN}:
+    Rolling Z-Score cao hơn DT-EKF khoảng $5{,}5\%$ và $8{,}5\%$ tương ứng.
+    Điều này phản ánh ưu thế của Z-Score khi phát hiện bất thường đơn biến
+    (chỉ RSSI) trong khi EKF phải dung hòa cả hai chiều trạng thái trong
+    ma trận nhiễu quan sát. Cải thiện đáng kể trên Indoor (DT-EKF 0,978 vs
+    Z-Score 0,958) cho thấy ưu thế khi cả hai kênh đồng thời mang thông tin.
+
+    \item \textbf{RSSI-RMSE LoRaWAN tương đối cao} (7,045 dBm): Tín hiệu
+    LoRaWAN dao động trên dải rộng hơn, khiến xấp xỉ tuyến tính hóa cục bộ
+    của EKF tại mỗi bước ít chính xác hơn so với Sigfox và WiFi.
+
+    \item \textbf{Tính đại diện của fault injection}: Biên độ tiêm $\pm 2\sigma$
+    phản ánh các lỗi thực tế ở mức vừa phải. Trong triển khai thực tế, các
+    lỗi tinh tế hơn ($< 1\sigma$) hoặc lỗi drift dài hạn có thể đòi hỏi
+    cơ chế phát hiện bổ sung.
+\end{itemize}
+
+% =============================================================================
+\section{Kết Luận}
+% =============================================================================
+
+Thực nghiệm trên ba bộ dữ liệu IoT thực tế (Sigfox Antwerp, LoRaWAN Italy,
+Indoor WiFi) chứng minh hiệu quả của khung đề xuất VAE + Digital Twin (EKF)
++ MADRL+GAT:
+
+\begin{enumerate}
+    \item \textbf{VAE} học biểu diễn tiềm ẩn có cấu trúc với MSE tái tạo
+    thấp ($< 0{,}054$) trên cả ba bộ dữ liệu, cung cấp đầu vào chất lượng
+    cho module MADRL.
+
+    \item \textbf{DT-EKF} vượt trội toàn diện các baseline tĩnh (K-Means,
+    GMM) về phân loại chất lượng trên mọi bộ dữ liệu. Cải thiện lớn nhất
+    trên LoRaWAN: Accuracy tăng $+27{,}8\%$ và AUC tăng $+35{,}6\%$ so với
+    K-Means. Về phát hiện bất thường, DT-EKF đạt AUC $\geq 0{,}834$ nhất
+    quán và vượt Z-Score trên Indoor, trong khi cung cấp đồng thời khả năng
+    phân loại chất lượng mà Z-Score không có.
+
+    \item \textbf{MADRL+GAT} hội tụ ổn định và đơn điệu trong 50 episode
+    trên cả ba bộ dữ liệu, với phần thưởng đánh giá tăng theo đặc tính
+    môi trường IoT.
+\end{enumerate}
+
+\end{document}

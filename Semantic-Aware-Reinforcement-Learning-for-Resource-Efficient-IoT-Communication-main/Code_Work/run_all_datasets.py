@@ -71,19 +71,19 @@ CFG = {
         'num_agents': 5,  'num_actions': 5,
         'madrl_eps': 50,  'madrl_lr': 1e-3, 'madrl_batch': 16,
         'gat_hidden': 16, 'gat_out': 8, 'num_heads': 2,
-        'dt_proc_noise': 0.5, 'dt_obs_noise': 1.5,
+        'dt_proc_noise': 0.5, 'dt_obs_noise': 0.5,
         'madrl_subsample': 500,
     },
     'lorawan': {
-        'vae_latent': 8,  'vae_hidden': 32, 'vae_epochs': 30, 'vae_batch': 512,
+        'vae_latent': 3,  'vae_hidden': 32, 'vae_epochs': 30, 'vae_batch': 512,
         'num_agents': 5,  'num_actions': 5,
         'madrl_eps': 50,  'madrl_lr': 1e-3, 'madrl_batch': 16,
         'gat_hidden': 16, 'gat_out': 8, 'num_heads': 2,
-        'dt_proc_noise': 0.3, 'dt_obs_noise': 1.0,
+        'dt_proc_noise': 0.3, 'dt_obs_noise': 0.4,
         'madrl_subsample': 500,
     },
     'indoor': {
-        'vae_latent': 8,  'vae_hidden': 32, 'vae_epochs': 30, 'vae_batch': 64,
+        'vae_latent': 3,  'vae_hidden': 32, 'vae_epochs': 30, 'vae_batch': 64,
         'num_agents': 5,  'num_actions': 5,
         'madrl_eps': 50,  'madrl_lr': 1e-3, 'madrl_batch': 16,
         'gat_hidden': 16, 'gat_out': 8, 'num_heads': 2,
@@ -105,9 +105,9 @@ def inject_anomalies(obs_seq, fraction=0.05, seed=42):
     """
     Inject synthetic faults into [mean_rssi, num_active_bs] sequence.
     Three fault types:
-      spike : RSSI jumps far above normal range   (e.g. interference)
-      drop  : RSSI collapses to near-minimum      (e.g. connection loss)
-      stuck : num_active_bs drops to 0 suddenly   (e.g. sensor freeze)
+      spike : RSSI moderate increase (+2σ)   (e.g. interference)
+      drop  : RSSI moderate decrease (-2σ)   (e.g. signal attenuation)
+      stuck : RSSI subtle drift (+1.5σ) + BS dropout (e.g. sensor freeze)
 
     Returns
     -------
@@ -127,12 +127,12 @@ def inject_anomalies(obs_seq, fraction=0.05, seed=42):
     fault_types = rng.choice(['spike', 'drop', 'stuck'], size=n_faults)
     for i, ft in zip(fault_idx, fault_types):
         if ft == 'spike':
-            injected[i, 0] = rssi_mean + 5.0 * rssi_std   # extreme high
+            injected[i, 0] = rssi_mean + 2.0 * rssi_std   # moderate interference
         elif ft == 'drop':
-            injected[i, 0] = rssi_mean - 5.0 * rssi_std   # extreme low
+            injected[i, 0] = rssi_mean - 2.0 * rssi_std   # signal attenuation
             injected[i, 1] = 0.0                            # all BSs lost
         else:  # stuck
-            injected[i, 0] = rssi_mean + 4.0 * rssi_std
+            injected[i, 0] = rssi_mean + 1.5 * rssi_std   # subtle sensor drift
             injected[i, 1] = 0.0
 
     y_fault = np.zeros(N, dtype=int)
@@ -446,73 +446,99 @@ def run_experiment(dataset_name, semantic_df, vae_X_norm, vae_input_dim,
     print(f"\n  Results saved -> {res_dir}")
 
     # ── Plots ───────────────────────────────────────────────────────────────
+    FS = 14        # base fontsize — matches 12pt document when figure scaled to textwidth
+    LW = 2.2       # default linewidth for main curves
+    C_NAVY  = '#003087'   # dark navy blue  (nét liền — đường đề xuất / chính)
+    C_RED   = '#8B0000'   # dark red        (nét liền — đường thứ hai)
+    C_BLACK = '#000000'   # black           (nét đứt  — baseline 1)
+    C_DGRAY = '#555555'   # dark gray       (nét đứt  — baseline 2 / raw)
+
     # VAE loss curve
-    fig, ax = plt.subplots(figsize=(6, 3))
-    ax.plot(vae_hist['recon'], label='Reconstruction', color='steelblue')
-    ax.plot(vae_hist['kl'],    label='KL divergence',  color='tomato')
-    ax.set_xlabel('Epoch'); ax.set_ylabel('Loss'); ax.legend()
-    ax.set_title(f'VAE Training Loss — {dataset_name}')
+    fig, ax = plt.subplots(figsize=(8, 4))
+    ax.plot(vae_hist['recon'], color=C_NAVY, lw=LW,       label='Reconstruction loss')
+    ax.plot(vae_hist['kl'],    color=C_RED,  lw=LW, ls='--', label='KL divergence')
+    ax.set_xlabel('Epoch', fontsize=FS)
+    ax.set_ylabel('Loss',  fontsize=FS)
+    ax.tick_params(labelsize=FS - 1)
+    ax.legend(fontsize=FS - 1)
+    ax.set_title(f'VAE Training Loss — {dataset_name}', fontsize=FS)
     plt.tight_layout()
     plot_and_save(plot_dir, 'vae_loss', fig)
 
     # MADRL reward curve
-    fig, ax = plt.subplots(figsize=(6, 3))
+    fig, ax = plt.subplots(figsize=(8, 4))
     window = max(1, len(ep_rewards) // 10)
     smoothed = pd.Series(ep_rewards).rolling(window, min_periods=1).mean()
-    ax.plot(ep_rewards, alpha=0.3, color='steelblue', label='Raw')
-    ax.plot(smoothed,   color='steelblue', lw=2, label='Smoothed')
-    ax.set_xlabel('Episode'); ax.set_ylabel('Cumulative Reward')
-    ax.set_title(f'MADRL+GAT Training — {dataset_name}')
-    ax.legend()
+    ax.plot(ep_rewards, alpha=0.35, color=C_DGRAY, lw=1.2, ls='--', label='Raw reward')
+    ax.plot(smoothed,   color=C_NAVY, lw=LW, label='Smoothed reward')
+    ax.set_xlabel('Episode',           fontsize=FS)
+    ax.set_ylabel('Cumulative Reward', fontsize=FS)
+    ax.tick_params(labelsize=FS - 1)
+    ax.legend(fontsize=FS - 1)
+    ax.set_title(f'MADRL+GAT Training — {dataset_name}', fontsize=FS)
     plt.tight_layout()
     plot_and_save(plot_dir, 'madrl_rewards', fig)
 
     # ROC curves — quality (K-Means / GMM vs DT-EKF) and anomaly (LOF / Z-Score vs DT-EKF)
-    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 
     ax = axes[0]
-    ax.plot(baseline['km_fpr'],  baseline['km_tpr'],  'b--', lw=1.5,
-            label=f'K-Means AUC={baseline["km_auc"]:.3f}')
-    ax.plot(baseline['gmm_fpr'], baseline['gmm_tpr'], 'g--', lw=1.5,
-            label=f'GMM AUC={baseline["gmm_auc"]:.3f}')
-    ax.plot(dt_quality_m['fpr'], dt_quality_m['tpr'], 'r-',  lw=2.0,
-            label=f'DT-EKF AUC={dt_quality_m["auc"]:.3f}')
-    ax.plot([0, 1], [0, 1], 'k:', lw=1)
-    ax.set_xlabel('False Positive Rate'); ax.set_ylabel('True Positive Rate')
-    ax.set_title(f'Quality ROC — {dataset_name}\n(K-Means / GMM vs DT-EKF)')
-    ax.legend(loc='lower right', fontsize=8)
+    ax.plot(baseline['km_fpr'],  baseline['km_tpr'],
+            color=C_BLACK, ls='--', lw=LW - 0.2,
+            label=f'K-Means  AUC={baseline["km_auc"]:.3f}')
+    ax.plot(baseline['gmm_fpr'], baseline['gmm_tpr'],
+            color=C_NAVY,  ls='--', lw=LW - 0.2,
+            label=f'GMM      AUC={baseline["gmm_auc"]:.3f}')
+    ax.plot(dt_quality_m['fpr'], dt_quality_m['tpr'],
+            color=C_RED,   ls='-',  lw=LW + 0.3,
+            label=f'DT-EKF   AUC={dt_quality_m["auc"]:.3f}')
+    ax.plot([0, 1], [0, 1], color=C_DGRAY, ls=':', lw=1)
+    ax.set_xlabel('False Positive Rate', fontsize=FS)
+    ax.set_ylabel('True Positive Rate',  fontsize=FS)
+    ax.tick_params(labelsize=FS - 1)
+    ax.set_title(f'Quality ROC — {dataset_name}', fontsize=FS)
+    ax.legend(loc='lower right', fontsize=FS - 2)
 
     ax = axes[1]
-    ax.plot(lof_fpr, lof_tpr, 'b--', lw=1.5,
-            label=f'LOF AUC={lof_auc:.3f}')
-    ax.plot(zs_fpr,  zs_tpr,  'g--', lw=1.5,
-            label=f'Z-Score AUC={zs_auc:.3f}')
-    ax.plot(dt_anomaly_m['fpr'], dt_anomaly_m['tpr'], 'r-', lw=2.0,
-            label=f'DT-EKF AUC={dt_anomaly_m["auc"]:.3f}')
-    ax.plot([0, 1], [0, 1], 'k:', lw=1)
-    ax.set_xlabel('False Positive Rate'); ax.set_ylabel('True Positive Rate')
-    ax.set_title(f'Anomaly ROC — {dataset_name}\n(LOF / Z-Score vs DT-EKF, fault-injection GT)')
-    ax.legend(loc='lower right', fontsize=8)
+    ax.plot(lof_fpr, lof_tpr,
+            color=C_BLACK, ls='--', lw=LW - 0.2,
+            label=f'LOF      AUC={lof_auc:.3f}')
+    ax.plot(zs_fpr,  zs_tpr,
+            color=C_NAVY,  ls='--', lw=LW - 0.2,
+            label=f'Z-Score  AUC={zs_auc:.3f}')
+    ax.plot(dt_anomaly_m['fpr'], dt_anomaly_m['tpr'],
+            color=C_RED,   ls='-',  lw=LW + 0.3,
+            label=f'DT-EKF   AUC={dt_anomaly_m["auc"]:.3f}')
+    ax.plot([0, 1], [0, 1], color=C_DGRAY, ls=':', lw=1)
+    ax.set_xlabel('False Positive Rate', fontsize=FS)
+    ax.set_ylabel('True Positive Rate',  fontsize=FS)
+    ax.tick_params(labelsize=FS - 1)
+    ax.set_title(f'Anomaly ROC — {dataset_name}', fontsize=FS)
+    ax.legend(loc='lower right', fontsize=FS - 2)
 
     plt.tight_layout()
     plot_and_save(plot_dir, 'roc_comparison', fig)
 
     # Digital Twin state estimation
-    fig, axes = plt.subplots(2, 1, figsize=(10, 5), sharex=True)
+    fig, axes = plt.subplots(2, 1, figsize=(12, 6), sharex=True)
     n_plot = min(500, len(dt_results))
     t = np.arange(n_plot)
     axes[0].plot(t, dt_results['obs_rssi'].values[:n_plot],
-                 alpha=0.5, label='Observed', color='gray')
+                 color=C_DGRAY, ls='--', lw=1.2, alpha=0.7, label='Observed')
     axes[0].plot(t, dt_results['est_rssi'].values[:n_plot],
-                 label='EKF estimate', color='steelblue', lw=1.5)
-    axes[0].set_ylabel('mean_rssi (dBm)'); axes[0].legend(fontsize=8)
+                 color=C_NAVY, ls='-', lw=LW, label='EKF estimate')
+    axes[0].set_ylabel('mean\_rssi (dBm)', fontsize=FS)
+    axes[0].tick_params(labelsize=FS - 1)
+    axes[0].legend(fontsize=FS - 1)
     axes[1].plot(t, dt_results['obs_num_bs'].values[:n_plot],
-                 alpha=0.5, label='Observed', color='gray')
+                 color=C_DGRAY, ls='--', lw=1.2, alpha=0.7, label='Observed')
     axes[1].plot(t, dt_results['est_num_bs'].values[:n_plot],
-                 label='EKF estimate', color='tomato', lw=1.5)
-    axes[1].set_ylabel('num_active_bs'); axes[1].set_xlabel('Step')
-    axes[1].legend(fontsize=8)
-    plt.suptitle(f'Digital Twin State Estimation — {dataset_name}')
+                 color=C_RED, ls='-', lw=LW, label='EKF estimate')
+    axes[1].set_ylabel('num\_active\_bs', fontsize=FS)
+    axes[1].set_xlabel('Step',           fontsize=FS)
+    axes[1].tick_params(labelsize=FS - 1)
+    axes[1].legend(fontsize=FS - 1)
+    plt.suptitle(f'Digital Twin State Estimation — {dataset_name}', fontsize=FS + 1)
     plt.tight_layout()
     plot_and_save(plot_dir, 'dt_estimation', fig)
 

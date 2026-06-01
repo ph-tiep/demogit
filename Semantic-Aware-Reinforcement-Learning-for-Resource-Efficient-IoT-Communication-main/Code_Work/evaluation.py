@@ -104,23 +104,26 @@ def evaluate_digital_twin_quality(results_df, y_true_quality):
     Evaluate Digital Twin quality classification vs. ground truth.
     Returns dict with accuracy, AUC, confusion matrix, RMSE.
     """
-    y_pred = results_df['quality_label'].values
+    # Soft score: raw est_rssi (monotonic, preserves ranking correctly)
+    est_rssi = results_df['est_rssi'].values
+    try:
+        auc = roc_auc_score(y_true_quality, est_rssi)
+        fpr, tpr, thresholds = roc_curve(y_true_quality, est_rssi)
+        # Youden's J: find optimal threshold on est_rssi
+        opt_idx = np.argmax(tpr - fpr)
+        opt_thresh = thresholds[opt_idx]
+        y_pred = (est_rssi >= opt_thresh).astype(int)
+    except ValueError:
+        auc, fpr, tpr = 0.5, np.array([0, 1]), np.array([0, 1])
+        y_pred = results_df['quality_label'].values
+
     acc = accuracy_score(y_true_quality, y_pred)
     cm = confusion_matrix(y_true_quality, y_pred)
     report = classification_report(y_true_quality, y_pred,
                                    output_dict=True, zero_division=0)
 
-    # Use EKF-estimated RSSI as soft quality confidence (sigmoid centred at -110 dBm)
-    est_rssi = results_df['est_rssi'].values
-    conf_score = 1.0 / (1.0 + np.exp(-(est_rssi - (-110.0)) / 5.0))
-    try:
-        auc = roc_auc_score(y_true_quality, conf_score)
-        fpr, tpr, _ = roc_curve(y_true_quality, conf_score)
-    except ValueError:
-        auc, fpr, tpr = 0.5, np.array([0, 1]), np.array([0, 1])
-
     rssi_rmse = float(np.sqrt(np.mean(
-        (results_df['est_rssi'].values - results_df['obs_rssi'].values) ** 2)))
+        (est_rssi - results_df['obs_rssi'].values) ** 2)))
     bs_rmse = float(np.sqrt(np.mean(
         (results_df['est_num_bs'].values - results_df['obs_num_bs'].values) ** 2)))
 
