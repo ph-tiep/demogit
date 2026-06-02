@@ -23,59 +23,95 @@ from sklearn.metrics import (
 
 class EKF:
     """
-    Extended Kalman Filter for IoT state estimation.
+    Extended Kalman Filter for IoT channel state estimation.
 
-    In our linear observation model the EKF reduces to a standard KF,
-    but the class is structured for nonlinear extensions (Jacobian-ready).
+    State       : x = [RSSI_dBm, num_active_bs]  (dBm domain)
+    Observation : z = [RSSI_dBm, num_active_bs]  (direct measurement)
+
+    Nonlinearity via mean-reverting transition for RSSI:
+        x[0]_{t+1} = x[0]_t + alpha * tanh((mu - x[0]_t) / sigma_s) + w
+    Jacobian F_t[0,0] = 1 - alpha / (sigma_s * cosh^2(...)) changes each
+    step — this is the defining property of EKF vs standard KF.
+
+    Physical motivation: RSSI in wireless channels exhibits mean-reversion
+    (Ornstein-Uhlenbeck-like dynamics) toward the long-term path-loss mean.
+    The tanh nonlinearity captures saturation effects at signal boundaries.
     """
 
     def __init__(self, state_dim=2, obs_dim=2,
-                 process_noise=0.5, obs_noise=1.5):
+                 process_noise=0.5, obs_noise=1.5,
+                 rssi_mean=0.0, rssi_std=10.0, alpha=0.3):
         self.state_dim = state_dim
-        self.obs_dim = obs_dim
+        self.obs_dim   = obs_dim
 
-        # Initial state & covariance
         self.x = np.zeros(state_dim)
         self.P = np.eye(state_dim) * 10.0
+        self.H = np.eye(obs_dim, state_dim)   # linear observation
+        self.Q = np.eye(state_dim) * process_noise
+        self.R = np.eye(obs_dim)   * obs_noise
 
-        # State-transition (constant-state model: x_{t+1} ≈ x_t)
-        self.F = np.eye(state_dim)
+        # Nonlinear transition parameters (set via set_rssi_stats)
+        self.rssi_mean  = rssi_mean    # μ: long-term RSSI mean (dBm)
+        self.rssi_std   = max(rssi_std, 1e-3)  # σ_s: scale
+        self.alpha      = alpha        # mean-reversion strength
 
-        # Observation matrix (direct measurement of state)
-        self.H = np.eye(obs_dim, state_dim)
+    def set_rssi_stats(self, mean, std):
+        """Call before run_sequence to set dataset-specific RSSI statistics."""
+        self.rssi_mean = float(mean)
+        self.rssi_std  = max(float(std), 1e-3)
 
-        # Noise covariances
-        self.Q = np.eye(state_dim) * process_noise   # process noise
-        self.R = np.eye(obs_dim) * obs_noise          # observation noise
+    # ------------------------------------------------------------------
+    # Nonlinear transition f(x) and its Jacobian F_t
+    # ------------------------------------------------------------------
+
+    def _f(self, x):
+        """Nonlinear state transition: tanh mean-reversion for RSSI."""
+        rssi_next = x[0] + self.alpha * np.tanh(
+            (self.rssi_mean - x[0]) / self.rssi_std)
+        nbs_next  = x[1]            # nBS follows constant-state model
+        return np.array([rssi_next, nbs_next])
+
+    def _F_jacobian(self, x):
+        """
+        Jacobian of f at x.  F_t[0,0] changes every step — genuine EKF.
+        d(f[0])/d(x[0]) = 1 - alpha / (sigma_s * cosh^2((mu-x[0])/sigma_s))
+        """
+        cosh_val = np.cosh((self.rssi_mean - x[0]) / self.rssi_std)
+        df_drssi = 1.0 - self.alpha / (self.rssi_std * cosh_val ** 2)
+        return np.array([[df_drssi, 0.0],
+                         [0.0,      1.0]])
+
+    # ------------------------------------------------------------------
+    # Predict – Update cycle
+    # ------------------------------------------------------------------
 
     def reset(self, x0):
         self.x = np.array(x0, dtype=float)
         self.P = np.eye(self.state_dim) * 10.0
 
     def predict(self):
-        """Predict step: propagate state and covariance forward."""
-        self.x = self.F @ self.x
-        self.P = self.F @ self.P @ self.F.T + self.Q
+        """EKF predict: nonlinear f(x) + linearized covariance update."""
+        F      = self._F_jacobian(self.x)        # time-varying Jacobian
+        self.x = self._f(self.x)                 # nonlinear prediction
+        self.P = F @ self.P @ F.T + self.Q
         return self.x.copy()
 
     def update(self, z):
         """
-        Update step: incorporate new measurement z.
-        Returns filtered state, innovation vector, NIS scalar.
+        EKF update (linear observation H = I).
+        Returns: (state_estimate, innovation, NIS).
         """
         z = np.array(z, dtype=float)
-        y = z - self.H @ self.x                          # innovation
-        S = self.H @ self.P @ self.H.T + self.R          # innovation covariance
-        K = self.P @ self.H.T @ np.linalg.inv(S)         # Kalman gain
+        y = z - self.H @ self.x
+        S = self.H @ self.P @ self.H.T + self.R
+        K = self.P @ self.H.T @ np.linalg.inv(S)
         self.x = self.x + K @ y
         self.P = (np.eye(self.state_dim) - K @ self.H) @ self.P
-
-        # Normalized Innovation Squared (chi-squared statistic)
         nis = float(y.T @ np.linalg.inv(S) @ y)
         return self.x.copy(), y, nis
 
     def step(self, z):
-        """One full predict-update cycle."""
+        """One full predict–update cycle."""
         self.predict()
         return self.update(z)
 
@@ -105,8 +141,10 @@ class DigitalTwin:
         self.chi2_thresh = chi2.ppf(anomaly_confidence, df=obs_dim)
         self.ekf = EKF(state_dim, obs_dim, process_noise, obs_noise)
 
-    def reset(self, first_obs):
+    def reset(self, first_obs, rssi_mean=None, rssi_std=None):
         self.ekf.reset(np.array(first_obs[:self.state_dim]))
+        if rssi_mean is not None:
+            self.ekf.set_rssi_stats(rssi_mean, rssi_std)
 
     def classify_quality(self, state):
         """Rule-based quality label consistent with baseline labelling."""
@@ -132,7 +170,10 @@ class DigitalTwin:
         if N == 0:
             return pd.DataFrame()
 
-        self.reset(observations[0])
+        rssi_vals = observations[:, 0]
+        rssi_mean = float(np.mean(rssi_vals))
+        rssi_std  = float(np.std(rssi_vals)) + 1e-6
+        self.reset(observations[0], rssi_mean=rssi_mean, rssi_std=rssi_std)
         rows = []
 
         for z in observations:

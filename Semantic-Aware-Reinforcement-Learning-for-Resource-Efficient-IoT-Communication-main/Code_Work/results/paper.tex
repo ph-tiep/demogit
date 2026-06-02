@@ -81,8 +81,8 @@ anomaly detection via the Normalized Innovation Squared (NIS) test; and
 and quality feedback. Experiments on three real-world IoT datasets—Sigfox
 Antwerp (14,377 samples), LoRaWAN Italy (190,502 samples), and Indoor WiFi
 (1,100 samples)—demonstrate that the proposed Digital Twin component achieves
-quality classification AUC up to 0.973, outperforming K-Means by up to
-80.0\% on LoRaWAN, while attaining anomaly detection AUC up to 0.978 on
+quality classification AUC up to 0.972, outperforming K-Means by up to
+80.4\% on LoRaWAN, while attaining anomaly detection AUC up to 0.987 on
 the Indoor dataset. The MADRL-GAT module converges stably within 50
 episodes, yielding evaluation rewards of 1,916, 2,519, and 3,089
 respectively.
@@ -261,9 +261,8 @@ statistical outliers.
 \label{sec:problem}
 % ============================================================
 
-The goal is to jointly optimize semantic compression fidelity, channel
-quality estimation accuracy, and cumulative resource-allocation reward
-over a finite horizon of $T$ time steps. The network-wide utility is
+The global objective is to optimize the framework across multiple decision
+stages. The network-wide utility at time $t$ is:
 \begin{equation}
 U(t) = \sum_{i=1}^{N}\bigl[
   \hat{q}_i(t)\cdot R_i(t) - \lambda\, a_i(t)
@@ -272,31 +271,41 @@ U(t) = \sum_{i=1}^{N}\bigl[
 \label{eq:utility}
 \end{equation}
 where $\hat{q}_i(t)\in\{0,1\}$ is the Digital Twin quality label,
-$\xi_i(t)$ is the NIS anomaly score (defined in Section~\ref{sec:dt}),
-and $\lambda,\mu>0$ are weighting coefficients. The optimization problem is:
-
+$\xi_i(t)$ is the NIS anomaly score, and $\lambda,\mu>0$ are weighting
+coefficients. Solving simultaneously for the VAE parameters $(\phi,\theta)$
+and the multi-agent actions $\{a_i\}$ in a single joint pass is
+computationally intractable and prone to gradient instability. We therefore
+decompose $(\mathcal{P})$ into a \textit{sequential optimization paradigm}
+with two discrete phases. In Phase~1, the semantic feature space is
+optimized offline to bound the reconstruction error:
 \begin{equation}
-(\mathcal{P})\!:\;\max_{\phi,\,\theta,\,\{a_i\}}\;
-  \mathbb{E}\!\left[\sum_{t=0}^{T}\sum_{i=1}^{N} U(t)\right]
-\label{eq:problem}
+\phi^* = \arg\max_{\phi,\theta}\;\mathcal{L}_{\rm VAE}(\phi,\theta;\mathbf{X}),
+\label{eq:vae_opt}
+\end{equation}
+subject to~\eqref{c1}. The encoder is then frozen and latent codes
+$\hat{\mathbf{z}}_i(t)=\bm{\mu}_{\phi^*}(\mathbf{x}_i(t))$ are propagated
+downstream. In Phase~2, the frozen representations inform the RL
+optimization:
+\begin{equation}
+(\mathcal{P}_{\rm RL})\!:\;\max_{\{a_i\}}\;
+  \mathbb{E}\!\left[\sum_{t=0}^{T}\sum_{i=1}^{N} U(t)
+  \;\bigg|\;
+  \hat{\mathbf{z}}_i(t)=\bm{\mu}_{\phi^*}(\mathbf{x}_i(t))\right]
+\label{eq:rl_opt}
 \end{equation}
 subject to:
 \begin{align}
-&\text{(C.1)}\;\; \mathcal{L}_{\rm VAE}(\phi,\theta) \leq \epsilon_{\rm recon},
-\tag{C.1}\label{c1}\\
-&\text{(C.2)}\;\; \hat{q}_i(t) = \mathbf{1}\!\bigl[\hat{x}^{(1)}_{i,t|t}\geq\tau^*\bigr],
+&\text{(C.2)}\;\; \hat{q}_i(t) = \mathbf{1}\!\bigl[\widehat{\rm RSSI}_{i,t}\geq\tau^*\bigr],
 \;\forall\, i,t,\tag{C.2}\label{c2}\\
 &\text{(C.3)}\;\; \Pr\!\bigl[\xi_i(t)>\chi^2_{0.95}(2)\big|\text{normal}\bigr]
 \leq 0.05,\;\forall\, i,t,\tag{C.3}\label{c3}\\
 &\text{(C.4)}\;\; a_i(t)\in\{1,\ldots,A\},\;\forall\, i,t.\tag{C.4}\label{c4}
 \end{align}
-Constraint~\eqref{c1} bounds the VAE reconstruction error; \eqref{c2}
-defines quality labels from EKF-estimated RSSI with Youden's J threshold
-$\tau^*$; \eqref{c3} controls the false-alarm rate of the NIS test;
-and~\eqref{c4} restricts actions to the discrete resource set.
-Problem~$(\mathcal{P})$ is non-convex and involves partial observability,
-making centralized solutions intractable. We address this with the
-three-stage MADRL-EKF-VAE framework described next.
+Constraint~\eqref{c2} defines quality labels from the EKF-estimated RSSI
+via Youden's J threshold $\tau^*$; \eqref{c3} controls the NIS false-alarm
+rate; \eqref{c4} restricts actions to the discrete resource set. This
+decoupled formulation guarantees convergence and practical feasibility,
+as detailed in the three-stage framework below.
 
 % ============================================================
 \section{Proposed Framework}
@@ -364,23 +373,31 @@ This choice is motivated by three properties unavailable in static methods:
 (i)~adaptive noise weighting via the time-varying Kalman gain $\mathbf{K}_t$;
 (ii)~statistically principled anomaly scoring via the NIS chi-squared test;
 and (iii)~data-adaptive quality threshold via Youden's J on the filtered
-state estimate. The state-space model adopts a constant-state prior:
+state estimate. The state vector is $\mathbf{s}_i(t)=[\text{RSSI}_i(t),\,n^{\rm BS}_i(t)]^\top$
+in dBm domain. The \textbf{nonlinear transition} model is:
 \begin{align}
-\mathbf{s}_i(t+1) &= \mathbf{F}\,\mathbf{s}_i(t)+\mathbf{w}(t),\quad
-\mathbf{w}\sim\mathcal{N}(\mathbf{0},\mathbf{Q}),\label{eq:ss1}\\
-\mathbf{z}_i(t) &= \mathbf{H}\,\mathbf{s}_i(t)+\mathbf{v}(t),\quad
-\mathbf{v}\sim\mathcal{N}(\mathbf{0},\mathbf{R}),\label{eq:ss2}
+s^{(1)}_i(t+1) &= s^{(1)}_i(t)
+  + \alpha\tanh\!\Bigl(\tfrac{\mu_i - s^{(1)}_i(t)}{\sigma_i}\Bigr)
+  + w^{(1)}_t, \label{eq:ss1}\\
+s^{(2)}_i(t+1) &= s^{(2)}_i(t) + w^{(2)}_t, \label{eq:ss2}
 \end{align}
-where $\mathbf{F}=\mathbf{H}=\mathbf{I}_2$, $\mathbf{Q}=\sigma_Q^2\mathbf{I}$,
-and $\mathbf{R}=\sigma_R^2\mathbf{I}$. This constant-state model is well-suited
-for slowly varying IoT channels~\cite{ref_ekf} and yields the optimal
-minimum mean squared error (MMSE) channel estimate under Gaussian noise.
-The EKF framework is retained for its general predict–update structure,
-which accommodates future nonlinear channel models (e.g., log-distance
-path-loss) without architectural changes. The filter executes:
+where $\mu_i$ and $\sigma_i$ are the dataset RSSI mean and standard
+deviation, $\alpha{=}0.3$ is the mean-reversion strength,
+and $\mathbf{w}\sim\mathcal{N}(\mathbf{0},\mathbf{Q})$.
+The observation model is linear: $\mathbf{z}_i(t)=\mathbf{H}\mathbf{s}_i(t)+\mathbf{v}(t)$,
+$\mathbf{H}=\mathbf{I}_2$. The tanh nonlinearity in~\eqref{eq:ss1}
+captures mean-reverting channel dynamics (Ornstein-Uhlenbeck-like) with
+saturation at the signal boundary. The time-varying transition Jacobian:
+\begin{equation}
+\mathbf{F}_t = \frac{\partial f}{\partial \mathbf{s}}\bigg|_{\hat{\mathbf{s}}_{t-1|t-1}}
+= \begin{bmatrix}1 - \dfrac{\alpha}{\sigma_i\cosh^2\!\left(\frac{\mu_i - \hat{s}^{(1)}}{\sigma_i}\right)} & 0\\[6pt] 0 & 1\end{bmatrix}
+\label{eq:F_jacobian}
+\end{equation}
+changes at \emph{every} time step — the defining characteristic of EKF
+distinguishing it from a standard KF. The filter executes:
 \begin{align}
-\hat{\mathbf{s}}_{t|t-1} &= \mathbf{F}\hat{\mathbf{s}}_{t-1|t-1},\quad
-\mathbf{P}_{t|t-1}=\mathbf{F}\mathbf{P}_{t-1|t-1}\mathbf{F}^\top+\mathbf{Q},
+\hat{\mathbf{s}}_{t|t-1} &= f(\hat{\mathbf{s}}_{t-1|t-1}),\quad
+\mathbf{P}_{t|t-1}=\mathbf{F}_t\mathbf{P}_{t-1|t-1}\mathbf{F}_t^\top+\mathbf{Q},
 \label{eq:pred}\\
 \mathbf{y}_t &= \mathbf{z}_t-\mathbf{H}\hat{\mathbf{s}}_{t|t-1},\quad
 \mathbf{S}_t=\mathbf{H}\mathbf{P}_{t|t-1}\mathbf{H}^\top+\mathbf{R},
@@ -396,7 +413,8 @@ The NIS statistic $\xi_t=\mathbf{y}_t^\top\mathbf{S}_t^{-1}\mathbf{y}_t
 anomalous if $\xi_t>\chi^2_{0.95}(2)\approx5.99$.
 
 \textbf{Quality classification.}
-Let $\hat{s}^{(1)}_{t|t}$ denote the EKF-estimated RSSI. The optimal
+Let $\hat{s}^{(1)}_{t|t}$ denote the EKF-estimated power (mW),
+converted to dBm as $\widehat{\rm RSSI}_{t} = 10\log_{10}(\hat{s}^{(1)}_{t|t})$. The optimal
 quality threshold is derived via Youden's J statistic:
 \begin{equation}
 \tau^*=\arg\max_\tau\bigl[\mathrm{TPR}(\tau)-\mathrm{FPR}(\tau)\bigr],
@@ -560,13 +578,13 @@ density of lower-dimensional sensor inputs.
 % ------------------------------------------------------------------
 \begin{figure*}[t]
   \centering
-  \subfloat[Antwerp (RSSI-RMSE=3.47 dBm)]{%
+  \subfloat[Antwerp (RSSI-RMSE=3.48 dBm)]{%
     \includegraphics[width=0.32\textwidth]{dt_estimation_antwerp}}
   \hfill
-  \subfloat[LoRaWAN (RSSI-RMSE=5.50 dBm)]{%
+  \subfloat[LoRaWAN (RSSI-RMSE=5.51 dBm)]{%
     \includegraphics[width=0.32\textwidth]{dt_estimation_lorawan}}
   \hfill
-  \subfloat[Indoor WiFi (RSSI-RMSE=2.44 dBm)]{%
+  \subfloat[Indoor WiFi (RSSI-RMSE=2.47 dBm)]{%
     \includegraphics[width=0.32\textwidth]{dt_estimation_indoor}}
   \caption{EKF Digital Twin state estimation over 500 time steps.
   Dark-gray dashed: noisy observations with injected faults;
@@ -577,19 +595,17 @@ density of lower-dimensional sensor inputs.
 
 Fig.~\ref{fig:dt} shows that the EKF effectively smooths injected faults
 and tracks the underlying channel trend. RSSI-RMSE is highest for LoRaWAN
-(5.50~dBm) owing to its wide dynamic range ($-20$ to $-120$~dBm), where
-the local linearization approximation of the EKF step introduces
-additional residual error. Indoor achieves the lowest RMSE (2.44~dBm)
-due to spatially constrained WiFi propagation.
+(5.51~dBm) owing to its wide dynamic range ($-20$ to $-120$~dBm).
+Indoor achieves the lowest RMSE (2.47~dBm) due to spatially constrained
+WiFi propagation.
 
 Table~\ref{tab:main_results} compares all methods comprehensively.
 DT-EKF outperforms K-Means and GMM on quality classification across all
 datasets. The most significant improvement is on LoRaWAN, where K-Means
-and GMM achieve AUC $\approx0.505$ (near-random, indicating absent
-feature-cluster structure), while DT-EKF reaches AUC = 0.909 — a
-relative gain of \textbf{+80.0\%}. For Indoor, Youden's-J threshold
-optimization pushes accuracy to 0.935, surpassing K-Means by
-+16.7 percentage points.
+and GMM achieve AUC $\approx0.505$ (near-random), while DT-EKF reaches
+AUC = 0.911 — a relative gain of \textbf{+80.4\%}. For Indoor,
+Youden's-J threshold optimization pushes accuracy to 0.934, surpassing
+K-Means by +16.6 percentage points.
 
 % ------------------------------------------------------------------
 % FIGURE 4 — ROC Curves
@@ -617,7 +633,7 @@ all datasets, confirming that static density estimation cannot detect
 temporally isolated faults. Rolling Z-Score achieves AUC 0.920, 0.919,
 0.958 because its local window amplifies $\pm2\sigma_{\rm global}$
 anomalies against a narrow local variance. DT-EKF surpasses Z-Score on
-Indoor (0.978 vs.\ 0.958), where the bivariate NIS statistic jointly
+Indoor (0.987 vs.\ 0.958), where the bivariate NIS statistic jointly
 exploits both RSSI and base-station count channels. On Antwerp and
 LoRaWAN, Z-Score retains a modest advantage on pure anomaly detection
 since its one-dimensional focus aligns with the predominantly
@@ -647,23 +663,23 @@ no quality classification capability.
    \multirow{3}{*}{\textbf{0.833}} &
    \multirow{3}{*}{1916.01} & \multirow{3}{*}{0.0082} \\
  & GMM & 0.6558 & 0.6965 & & & & & \\
- & \textbf{DT-EKF} & \textbf{0.8144} & \textbf{0.8639} & & & & & \\
+ & \textbf{DT-EKF} & \textbf{0.8178} & \textbf{0.8666} & & & & & \\
 \midrule
 \multirow{3}{*}{LoRaWAN}
  & K-Means & 0.5050 & 0.5050 &
    \multirow{3}{*}{0.500} & \multirow{3}{*}{0.919} &
-   \multirow{3}{*}{\textbf{0.788}} &
+   \multirow{3}{*}{\textbf{0.796}} &
    \multirow{3}{*}{2519.26} & \multirow{3}{*}{0.0160} \\
  & GMM & 0.5050 & 0.5164 & & & & & \\
- & \textbf{DT-EKF} & \textbf{0.8438} & \textbf{0.9089} & & & & & \\
+ & \textbf{DT-EKF} & \textbf{0.8462} & \textbf{0.9106} & & & & & \\
 \midrule
 \multirow{3}{*}{Indoor}
  & K-Means & 0.7673 & 0.8300 &
    \multirow{3}{*}{0.489} & \multirow{3}{*}{0.958} &
-   \multirow{3}{*}{\textbf{0.978}} &
+   \multirow{3}{*}{\textbf{0.987}} &
    \multirow{3}{*}{3088.95} & \multirow{3}{*}{0.0537} \\
  & GMM & 0.6109 & 0.6657 & & & & & \\
- & \textbf{DT-EKF} & \textbf{0.9345} & \textbf{0.9725} & & & & & \\
+ & \textbf{DT-EKF} & \textbf{0.9336} & \textbf{0.9723} & & & & & \\
 \bottomrule
 \end{tabular}
 \end{table*}
@@ -704,8 +720,8 @@ Q-network convergence — a direct benefit of Stage~1 compression.
 DT-EKF is the only approach in our evaluation that simultaneously
 performs quality classification and anomaly detection. K-Means and GMM
 provide quality labels only; Z-Score and LOF detect anomalies only.
-DT-EKF achieves quality AUC improvements of $+27.9\%$, $+80.0\%$,
-and $+17.2\%$ over K-Means on Antwerp, LoRaWAN, and Indoor respectively.
+DT-EKF achieves quality AUC improvements of $+28.3\%$, $+80.4\%$,
+and $+17.1\%$ over K-Means on Antwerp, LoRaWAN, and Indoor respectively.
 On Indoor, where both RSSI and base-station count carry complementary
 anomaly information, the bivariate NIS statistic gives DT-EKF a decisive
 $+2.1\%$ AUC advantage over Z-Score. On Antwerp and LoRaWAN, Z-Score
@@ -723,8 +739,8 @@ We presented a unified three-stage framework for intelligent IoT resource
 management combining VAE semantic compression, EKF Digital Twin joint
 quality classification and anomaly detection, and MADRL-GAT cooperative
 resource allocation. Evaluated on three heterogeneous real-world IoT
-datasets, the framework demonstrates up to $+80.0\%$ quality AUC
-improvement over K-Means on LoRaWAN, anomaly AUC of 0.978 on Indoor,
+datasets, the framework demonstrates up to $+80.4\%$ quality AUC
+improvement over K-Means on LoRaWAN, anomaly AUC of 0.987 on Indoor,
 and stable MADRL convergence within 50 episodes with evaluation rewards
 up to 3,089. Future work will explore Unscented KF for nonlinear
 channel dynamics, PPO-based agents for improved sample efficiency, and

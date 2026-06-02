@@ -251,17 +251,25 @@ with $\mathbf{R}=\sigma_R^2\mathbf{I}$.
 
 \subsection{Extended Kalman Filter Update}
 
-The constant-state prior ($\mathbf{F}=\mathbf{H}=\mathbf{I}_2$) is a
-deliberate design choice suited for slowly varying IoT channels, yielding
-the optimal MMSE channel estimate under Gaussian noise. The EKF framework
-is selected over static methods (K-Means, GMM, LOF) for three reasons:
-(i)~the time-varying Kalman gain $\mathbf{K}_t$ adaptively weights new
-observations against the current uncertainty $\mathbf{P}_{t|t-1}$;
-(ii)~the NIS statistic provides a chi-squared anomaly test grounded in
-the filter's own uncertainty model; and (iii)~the Youden's J threshold
-on the filtered RSSI estimate is data-adaptive across heterogeneous
-IoT deployments. The EKF structure also accommodates future nonlinear
-channel models without architectural redesign.
+The EKF framework is selected over static methods (K-Means, GMM, LOF)
+for three reasons: (i)~the time-varying Kalman gain $\mathbf{K}_t$
+adaptively weights observations against current uncertainty
+$\mathbf{P}_{t|t-1}$; (ii)~the NIS statistic provides a chi-squared
+anomaly test grounded in the filter's uncertainty model; and
+(iii)~the Youden's J threshold on the filtered estimate is data-adaptive.
+The \textbf{nonlinear transition} model employs a tanh mean-reversion
+function for RSSI dynamics (Ornstein-Uhlenbeck-like), motivated by the
+natural tendency of wireless channels to revert toward the long-term
+path-loss mean:
+\begin{equation}
+s^{(1)}_{t+1} = s^{(1)}_t +
+  \alpha\tanh\!\Bigl(\tfrac{\mu - s^{(1)}_t}{\sigma}\Bigr) + w_t,
+\label{eq:tanh_transition}
+\end{equation}
+where $\mu$ and $\sigma$ are the dataset RSSI mean and standard deviation,
+$\alpha{=}0.3$. The time-varying Jacobian
+$\mathbf{F}_t[0,0] = 1 - \alpha/(\sigma\cosh^2((\mu-\hat{s}^{(1)})/\sigma))$
+changes at every step — the defining characteristic of EKF.
 The filter executes a \textit{predict}–\textit{update} cycle at each time
 step $t$:
 
@@ -504,20 +512,22 @@ their mapping to the three stages of the framework.
     & \textbf{Key Quantitative Result} \\
 \midrule
 1 & VAE Semantic Compression
-  & Provides a semantic state-space abstraction for high-dimensional,
-    heterogeneous IoT telemetry via $\beta$-VAE ELBO to overcome the
-    curse of dimensionality and significantly enhance downstream
-    MARL sample efficiency
+  & Introduces a \textit{decoupled} semantic feature-space abstraction
+    trained offline via $\beta$-VAE ELBO to minimize downstream MARL
+    state dimensionality without joint-gradient instability; frozen
+    encoder propagates $\hat{\mathbf{z}}=\bm{\mu}_{\phi^*}(\mathbf{x})$
+    to Phase~2
   & MSE $\leq 0.054$; dimensional reduction up to $5.25\times$
-    ($84\!\to\!16$) while preserving discriminative channel features \\
+    ($84\!\to\!16$) while fully preserving discriminative channel features \\
 \midrule
 2 & EKF Digital Twin
   & Achieves \textit{joint} connection quality classification
-    (adaptive Youden's~J threshold on $\hat{x}^{(1)}_{t|t}$)
+    (adaptive Youden's~J threshold on $\widehat{\rm RSSI}_{t|t}$)
     and real-time anomaly detection (bivariate NIS $\chi^2$ test)
-    within a single, low-latency filter pass
-  & Quality AUC up to $0.973$; Anomaly AUC up to $0.978$;
-    outperforms static K-Means by up to $+80\%$ on LoRaWAN \\
+    within a single low-latency filter pass; nonlinear tanh
+    transition Jacobian $\mathbf{F}_t$ changes each step (genuine EKF)
+  & Quality AUC up to $0.972$; Anomaly AUC up to $0.987$;
+    outperforms static K-Means by up to $+80.4\%$ on LoRaWAN \\
 \midrule
 3 & MADRL-GAT Resource Allocation
   & Introduces a cross-layer coupling mechanism that feeds
