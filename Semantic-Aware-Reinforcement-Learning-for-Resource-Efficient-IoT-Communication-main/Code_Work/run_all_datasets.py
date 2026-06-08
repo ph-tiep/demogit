@@ -262,10 +262,11 @@ def plot_roc_comparison(ax, fpr_base, tpr_base, auc_base,
     ax.plot(fpr_base, tpr_base, 'b--', lw=1.5, label=f'Baseline AUC={auc_base:.3f}')
     ax.plot(fpr_prop, tpr_prop, 'r-',  lw=2.0, label=f'Proposed AUC={auc_prop:.3f}')
     ax.plot([0, 1], [0, 1], 'k:', lw=1)
-    ax.set_xlabel('False Positive Rate')
-    ax.set_ylabel('True Positive Rate')
-    ax.set_title(title)
-    ax.legend(loc='lower right', fontsize=8)
+    ax.set_xlabel('False Positive Rate', fontsize=18)
+    ax.set_ylabel('True Positive Rate',  fontsize=18)
+    ax.tick_params(labelsize=17)
+    ax.set_title(title, fontsize=18)
+    ax.legend(loc='lower right', fontsize=16)
 
 
 # ===========================================================================
@@ -446,7 +447,7 @@ def run_experiment(dataset_name, semantic_df, vae_X_norm, vae_input_dim,
     print(f"\n  Results saved -> {res_dir}")
 
     # ── Plots ───────────────────────────────────────────────────────────────
-    FS = 14        # base fontsize — matches 12pt document when figure scaled to textwidth
+    FS = 18        # base fontsize — matches 12pt document when figure scaled to textwidth
     LW = 2.2       # default linewidth for main curves
     C_NAVY  = '#003087'   # dark navy blue  (nét liền — đường đề xuất / chính)
     C_RED   = '#8B0000'   # dark red        (nét liền — đường thứ hai)

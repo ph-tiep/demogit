@@ -1,0 +1,128 @@
+% ============================================================
+% REVISED INTRODUCTION
+% Structure:
+%   1. Problem motivation
+%   2-5. Prior work with logical transitions (each paragraph leads to next)
+%   6. "In general, several critical gaps remain..."
+%   7. "In this research, we propose..."
+%   8. Experimental setup + key results summary
+%   9. Main contributions list
+%  10. Paper organization
+% ============================================================
+\section{Introduction}
+\label{sec:intro}
+
+\IEEEPARstart{T}{he} explosive growth of IoT deployments---spanning smart
+cities, industrial sensing, and indoor positioning---has introduced
+unprecedented demands on wireless network infrastructure. Devices operating
+across heterogeneous technologies such as Sigfox, LoRaWAN, and Indoor WiFi
+continuously generate high-dimensional telemetry streams that must be
+processed, monitored, and acted upon with minimal latency and energy
+overhead~\cite{ref_iot_survey}. Two fundamental challenges arise: the raw
+feature space is high-dimensional and noisy, making downstream learning
+inefficient; and the network state evolves continuously over time, requiring
+adaptive mechanisms that simultaneously classify connection quality and detect
+anomalous behaviour.
+
+A natural approach to the dimensionality challenge is to extract compact,
+task-relevant representations from raw sensor observations before any
+downstream processing. Liu et al.~\cite{ref_vae_wireless} proposed a
+task-adaptive semantic compression scheme employing a Variational Autoencoder
+(VAE) to encode raw sensor observations into compact representations,
+substantially reducing communication overhead in resource-constrained
+networks. The compression rate adapts to instantaneous channel quality,
+yielding strong reconstruction fidelity across diverse wireless conditions.
+However, this scheme targets static point-to-point links without temporal
+state tracking, provides no anomaly-detection capability, and does not
+coordinate multiple agents---restricting its applicability to the dynamic,
+heterogeneous IoT settings addressed in this work.
+
+Beyond feature compression, the problem of adaptive resource management under
+time-varying interference has been studied through deep reinforcement learning
+(DRL). Hazarika et al.~\cite{ref_marl_wireless} developed a deep RL framework
+for computation offloading in Internet-of-Vehicles (IoV) networks, training
+DQN agents on raw network-state features to achieve adaptive resource
+management with low control overhead. A key limitation, however, is that
+raw, high-dimensional feature vectors serve as the agent state without
+semantic compression, inflating the effective state space and degrading
+sample efficiency. Moreover, no channel-quality feedback enters the reward
+signal, preventing the agent from distinguishing nominal from degraded link
+conditions. These shortcomings motivate coupling feature compression with a
+predictive channel model before resource allocation.
+
+To address the channel-awareness limitation, digital twin (DT) technology has
+been introduced as a mechanism for real-time channel prediction and quality
+monitoring. Hazarika et al.~\cite{ref_dt_uav} integrated a digital twin with
+a hybrid machine learning classifier for resource allocation in UAV-aided IoV
+networks, enabling one-step-ahead channel prediction that yields measurable
+gains over purely reactive baselines. Nevertheless, quality classification
+relies on fixed decision thresholds that cannot adapt to heterogeneous dataset
+statistics, anomaly detection is absent, and raw features are fed directly to
+the allocation module without semantic compression---leaving the system unable
+to flag silent sensor faults or generalize across heterogeneous channel
+conditions.
+
+Recognizing the need for a more tightly integrated system, Hazarika
+et al.~\cite{ref_semadt} combined semantic compression, predictive digital
+twin forecasting, and multi-agent deep RL with a graph neural network (GNN)
+for maritime search-and-rescue IoT operations, demonstrating that semantic
+state inputs and DT-predicted quality signals together substantially outperform
+non-predictive MARL baselines. Despite this advance, the GCN layer applies
+symmetric neighborhood aggregation without capturing heterogeneous inter-agent
+relationship strengths, whereas graph attention networks~\cite{ref_gat_comm}
+do so via learned attention weights. Furthermore, the anomaly detector relies
+on a fixed scalar threshold rather than a statistically principled multivariate
+test~\cite{ref_anomaly_survey,ref_lof}, and the evaluation is confined to a
+single maritime domain, leaving cross-technology generalizability unexplored.
+
+In general, several critical gaps remain in the existing literature. First,
+semantic compression, channel state monitoring, and resource allocation are
+treated as independent modules with no unified feedback path between them.
+Second, existing digital twin implementations address either quality
+classification \emph{or} anomaly detection in isolation, rather than jointly
+performing both within a single principled state estimator. Third, no prior
+system has been validated across heterogeneous IoT technologies in a unified
+architecture, limiting confidence in cross-domain generalizability.
+
+In this research, we propose a unified three-stage intelligent framework to
+simultaneously address the above gaps. The framework integrates: (i) a
+Variational Autoencoder (VAE) for semantic compression of raw IoT features
+into compact latent representations; (ii) an Extended Kalman Filter
+(EKF)-based Digital Twin for joint connection quality classification and
+anomaly detection via the Normalized Innovation Squared (NIS) test; and
+(iii) a Multi-Agent Deep Reinforcement Learning module augmented with a
+Graph Attention Network (MADRL-GAT) for cooperative resource allocation
+guided by the semantic state and quality feedback produced in the earlier
+stages.
+
+We evaluate the proposed framework on three real-world IoT datasets spanning
+heterogeneous wireless technologies: Sigfox Antwerp, LoRaWAN Italy, and
+Indoor WiFi. Experimental results show that the EKF Digital Twin achieves
+quality classification AUC of up to 0.972, outperforming K-Means by up to
+80.4\% on the LoRaWAN dataset, while attaining anomaly detection AUC of
+0.987 on the Indoor dataset. The MADRL-GAT module converges stably within
+50 training episodes, yielding evaluation rewards of 1,916, 2,519, and 3,089
+across the three datasets, respectively, confirming that the integrated
+semantic and quality-aware state representation accelerates policy learning.
+
+The main contributions of this paper are summarized as follows:
+\begin{itemize}
+\item \textbf{We propose a unified three-stage framework} that tightly couples
+VAE semantic compression, EKF Digital Twin monitoring, and MADRL-GAT resource
+allocation into a single pipeline, where compressed latent codes serve as both
+the MADRL state space and the input for quality-aware reward computation.
+\item \textbf{We design an EKF-based Digital Twin that simultaneously performs
+connection quality classification and anomaly detection} within a single filter
+pass, using a data-adaptive Youden's J threshold on the estimated RSSI for
+quality labeling and the NIS chi-squared test for fault flagging.
+\item \textbf{We validate the framework across three heterogeneous real-world
+IoT datasets}---Sigfox Antwerp, LoRaWAN Italy, and Indoor WiFi---demonstrating
+consistent robustness across technologies with substantially different channel
+characteristics and feature dimensionalities.
+\end{itemize}
+
+The remainder of this paper is organised as follows. Section~\ref{sec:model}
+presents the system model. Section~\ref{sec:problem} formulates the
+optimization problem. Section~\ref{sec:method} details the proposed framework.
+Section~\ref{sec:experiments} reports experimental results.
+Section~\ref{sec:conclusion} concludes the paper.
