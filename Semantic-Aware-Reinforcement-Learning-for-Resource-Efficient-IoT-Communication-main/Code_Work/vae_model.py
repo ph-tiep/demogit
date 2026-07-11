@@ -116,7 +116,7 @@ def train_vae(X_np, input_dim, latent_dim=16, hidden_dim=64,
         history['recon'].append(epoch_recon / n)
         history['kl'].append(epoch_kl / n)
 
-        if verbose and (epoch + 1) % 20 == 0:
+        if verbose and (epoch + 1) % 10 == 0:
             print(f"  VAE [{epoch+1}/{epochs}] "
                   f"Loss={epoch_total/n:.2f}  "
                   f"Recon={epoch_recon/n:.2f}  "

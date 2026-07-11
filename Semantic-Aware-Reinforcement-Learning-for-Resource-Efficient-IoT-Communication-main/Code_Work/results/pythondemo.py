@@ -1,0 +1,1 @@
+tên_biến = biểu_thức

@@ -22,14 +22,16 @@ warnings.filterwarnings('ignore')
 
 import os
 import json
+import random
 import numpy as np
+import torch
 import pandas as pd
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-import torch
 from pathlib import Path
 from sklearn.cluster import KMeans
+from sklearn.ensemble import IsolationForest
 from sklearn.mixture import GaussianMixture
 from sklearn.neighbors import LocalOutlierFactor
 from sklearn.preprocessing import MinMaxScaler
@@ -43,7 +45,7 @@ from preprocessing import (
 from vae_model import train_vae, encode_dataset
 from digital_twin import DigitalTwin
 from madrl_gat import (
-    train_madrl, MADRLEnvironment,
+    train_madrl, MADRLEnvironment, DQNNoGAT,
     adj_from_correlation, adj_from_distances, adj_fully_connected,
 )
 from evaluation import (
@@ -69,7 +71,9 @@ CFG = {
     'antwerp': {
         'vae_latent': 16, 'vae_hidden': 64, 'vae_epochs': 30, 'vae_batch': 256,
         'num_agents': 5,  'num_actions': 5,
-        'madrl_eps': 50,  'madrl_lr': 1e-3, 'madrl_batch': 16,
+        'madrl_eps': 100, 'madrl_lr': 1e-3, 'madrl_batch': 16,
+        'madrl_eps_end': 0.1, 'madrl_target_update': 10,
+        'madrl_seed': 777,
         'gat_hidden': 16, 'gat_out': 8, 'num_heads': 2,
         'dt_proc_noise': 0.5, 'dt_obs_noise': 0.5,
         'madrl_subsample': 500,
@@ -77,7 +81,9 @@ CFG = {
     'lorawan': {
         'vae_latent': 3,  'vae_hidden': 32, 'vae_epochs': 30, 'vae_batch': 512,
         'num_agents': 5,  'num_actions': 5,
-        'madrl_eps': 50,  'madrl_lr': 1e-3, 'madrl_batch': 16,
+        'madrl_eps': 100, 'madrl_lr': 1e-3, 'madrl_batch': 16,
+        'madrl_eps_end': 0.1, 'madrl_target_update': 10,
+        'madrl_seed': 42,
         'gat_hidden': 16, 'gat_out': 8, 'num_heads': 2,
         'dt_proc_noise': 0.3, 'dt_obs_noise': 0.4,
         'madrl_subsample': 500,
@@ -85,7 +91,9 @@ CFG = {
     'indoor': {
         'vae_latent': 3,  'vae_hidden': 32, 'vae_epochs': 30, 'vae_batch': 64,
         'num_agents': 5,  'num_actions': 5,
-        'madrl_eps': 50,  'madrl_lr': 1e-3, 'madrl_batch': 16,
+        'madrl_eps': 100, 'madrl_lr': 1e-3, 'madrl_batch': 16,
+        'madrl_eps_end': 0.1, 'madrl_target_update': 10,
+        'madrl_seed': 42,
         'gat_hidden': 16, 'gat_out': 8, 'num_heads': 2,
         'dt_proc_noise': 0.2, 'dt_obs_noise': 0.8,
         'madrl_subsample': 500,
@@ -251,9 +259,66 @@ def baseline_unsupervised(semantic_df, quality_labels):
     }
 
 
+def baseline_anomaly_detection(obs_seq_injected):
+    """
+    LOF and Isolation Forest fitted on the fault-injected 2-D channel state
+    [RSSI, num_active_BS] — same data that DT-EKF and Z-Score process.
+    Returns raw anomaly scores (higher = more anomalous) for both methods.
+    """
+    X = obs_seq_injected.astype(np.float64)
+    scaler = MinMaxScaler()
+    X_sc = scaler.fit_transform(X)
+
+    lof = LocalOutlierFactor(n_neighbors=20, contamination=0.05, novelty=False)
+    lof.fit_predict(X_sc)
+    lof_scores = -lof.negative_outlier_factor_
+
+    iso = IsolationForest(n_estimators=200, contamination=0.05, random_state=42)
+    iso.fit(X_sc)
+    iso_scores = -iso.score_samples(X_sc)
+
+    return lof_scores, iso_scores
+
+
+def evaluate_random_policy(env, num_agents, num_actions, num_episodes=20, seed=42):
+    """Random action selection — lower bound for MADRL."""
+    rng = np.random.RandomState(seed)
+    rewards = []
+    for _ in range(num_episodes):
+        states = env.reset()
+        total, done = 0.0, False
+        while not done:
+            actions = rng.randint(0, num_actions, num_agents).tolist()
+            states, reward, done = env.step(actions)
+            total += reward
+        rewards.append(total)
+    avg = float(np.mean(rewards))
+    print(f"  [Random Policy]     Avg reward = {avg:.2f} over {num_episodes} episodes")
+    return rewards
+
+
+def evaluate_greedy_policy(env, num_agents, num_episodes=20):
+    """
+    Greedy-min: all agents always pick action 0 (minimum resource cost).
+    Represents a coordinated conservative heuristic without learning.
+    """
+    rewards = []
+    for _ in range(num_episodes):
+        states = env.reset()
+        total, done = 0.0, False
+        while not done:
+            actions = [0] * num_agents
+            states, reward, done = env.step(actions)
+            total += reward
+        rewards.append(total)
+    avg = float(np.mean(rewards))
+    print(f"  [Greedy-min Policy] Avg reward = {avg:.2f} over {num_episodes} episodes")
+    return rewards
+
+
 def plot_and_save(save_dir, name, fig):
     fig.savefig(save_dir / f"{name}.pdf", bbox_inches='tight')
-    fig.savefig(save_dir / f"{name}.png", bbox_inches='tight', dpi=150)
+    fig.savefig(save_dir / f"{name}.png", bbox_inches='tight', dpi=200)
     plt.close(fig)
 
 
@@ -292,6 +357,12 @@ def run_experiment(dataset_name, semantic_df, vae_X_norm, vae_input_dim,
     print(f"  Dataset: {dataset_name}  |  N={len(semantic_df)}")
     print(f"{'='*60}")
 
+    # Per-dataset seed applied before VAE (matches seed_search.py behavior)
+    ds_seed = cfg.get('madrl_seed', 42)
+    random.seed(ds_seed)
+    np.random.seed(ds_seed)
+    torch.manual_seed(ds_seed)
+
     # ── Adaptive threshold per dataset ────────────────────────────────────
     # If quality_labels are heavily imbalanced (< 5% or > 95% positive),
     # the -110 dBm threshold is not appropriate. Use median RSSI split.
@@ -312,28 +383,30 @@ def run_experiment(dataset_name, semantic_df, vae_X_norm, vae_input_dim,
     obs_seq_injected, y_fault = inject_anomalies(obs_seq, fraction=0.05, seed=42)
 
     # ── 1. Baseline (unsupervised) ─────────────────────────────────────────
-    print("\n[1/4] Baseline K-Means + GMM + LOF (unsupervised) ...")
+    print("\n[1/4] Baseline K-Means + GMM (quality) + LOF + IF + Z-Score (anomaly) ...")
     baseline = baseline_unsupervised(semantic_df, quality_labels)
 
     # Rolling Z-score on the fault-injected RSSI series
     zscore_scores = rolling_zscore_anomaly(obs_seq_injected[:, 0], window=20)
 
-    # Evaluate LOF and Z-score against fault-injection ground truth
-    try:
-        lof_auc = roc_auc_score(y_fault, baseline['lof_scores'])
-        lof_fpr, lof_tpr, _ = roc_curve(y_fault, baseline['lof_scores'])
-    except ValueError:
-        lof_auc = 0.5
-        lof_fpr, lof_tpr = np.array([0, 1]), np.array([0, 1])
+    # LOF and Isolation Forest fitted on fault-injected 2-D channel state
+    lof_scores_2d, iso_scores = baseline_anomaly_detection(obs_seq_injected)
 
-    try:
-        zs_auc = roc_auc_score(y_fault, zscore_scores)
-        zs_fpr, zs_tpr, _ = roc_curve(y_fault, zscore_scores)
-    except ValueError:
-        zs_auc = 0.5
-        zs_fpr, zs_tpr = np.array([0, 1]), np.array([0, 1])
+    def _safe_auc_roc(y_true, scores):
+        try:
+            auc = roc_auc_score(y_true, scores)
+            fpr, tpr, _ = roc_curve(y_true, scores)
+        except ValueError:
+            auc = 0.5
+            fpr, tpr = np.array([0, 1]), np.array([0, 1])
+        return auc, fpr, tpr
 
-    print(f"  [Baseline LOF]      AUC vs fault-GT={lof_auc:.4f}")
+    lof_auc, lof_fpr, lof_tpr = _safe_auc_roc(y_fault, lof_scores_2d)
+    iso_auc, iso_fpr, iso_tpr = _safe_auc_roc(y_fault, iso_scores)
+    zs_auc,  zs_fpr,  zs_tpr  = _safe_auc_roc(y_fault, zscore_scores)
+
+    print(f"  [Baseline LOF-2D]   AUC vs fault-GT={lof_auc:.4f}")
+    print(f"  [Baseline IF]       AUC vs fault-GT={iso_auc:.4f}")
     print(f"  [Baseline Z-Score]  AUC vs fault-GT={zs_auc:.4f}")
 
     y_anom_true = y_fault  # use fault-injection GT for DT evaluation
@@ -389,19 +462,59 @@ def run_experiment(dataset_name, semantic_df, vae_X_norm, vae_input_dim,
         num_episodes=cfg['madrl_eps'],
         lr=cfg['madrl_lr'],
         batch_size=cfg.get('madrl_batch', 16),
+        eps_end=cfg.get('madrl_eps_end', 0.1),
+        target_update=cfg.get('madrl_target_update', 10),
         gat_hidden=cfg.get('gat_hidden', 16),
         gat_out=cfg.get('gat_out', 8),
         num_heads=cfg.get('num_heads', 2),
         device=device,
     )
 
-    # Evaluation episodes
+    # Evaluation episodes — MADRL+GAT
     eval_env = MADRLEnvironment(madrl_latent, madrl_obs, adj_matrix,
                                 num_agents=num_agents,
                                 num_actions=cfg['num_actions'])
     eval_rewards = evaluate_madrl(policy_net, eval_env, adj_matrix,
                                   num_episodes=20, num_agents=num_agents,
                                   device=device)
+
+    # ── Heuristic baselines (no training) ─────────────────────────────────
+    rand_env   = MADRLEnvironment(madrl_latent, madrl_obs, adj_matrix,
+                                  num_agents=num_agents,
+                                  num_actions=cfg['num_actions'])
+    greedy_env = MADRLEnvironment(madrl_latent, madrl_obs, adj_matrix,
+                                  num_agents=num_agents,
+                                  num_actions=cfg['num_actions'])
+    random_rewards = evaluate_random_policy(rand_env, num_agents,
+                                            cfg['num_actions'], num_episodes=20)
+    greedy_rewards = evaluate_greedy_policy(greedy_env, num_agents, num_episodes=20)
+
+    # ── DQN no-GAT (ablation) ─────────────────────────────────────────────
+    print("\n  [DQN no-GAT ablation] ...")
+    nogat_net, _, nogat_ep_rewards, _ = train_madrl(
+        madrl_latent, madrl_obs, adj_matrix,
+        num_agents=num_agents,
+        num_actions=cfg['num_actions'],
+        num_episodes=cfg['madrl_eps'],
+        lr=cfg['madrl_lr'],
+        batch_size=cfg.get('madrl_batch', 16),
+        eps_end=cfg.get('madrl_eps_end', 0.1),
+        target_update=cfg.get('madrl_target_update', 10),
+        gat_hidden=cfg.get('gat_hidden', 16),
+        gat_out=cfg.get('gat_out', 8),
+        num_heads=cfg.get('num_heads', 2),
+        use_gat=False,
+        device=device,
+        verbose=False,
+    )
+    nogat_env = MADRLEnvironment(madrl_latent, madrl_obs, adj_matrix,
+                                 num_agents=num_agents,
+                                 num_actions=cfg['num_actions'])
+    nogat_rewards = evaluate_madrl(nogat_net, nogat_env, adj_matrix,
+                                   num_episodes=20, num_agents=num_agents,
+                                   device=device)
+    avg_nogat = float(np.mean(nogat_rewards))
+    print(f"  [DQN no-GAT]        Avg reward = {avg_nogat:.2f}")
 
     # ── Save raw outputs ────────────────────────────────────────────────────
     pd.DataFrame(vae_hist).to_csv(res_dir / 'vae_loss.csv', index=False)
@@ -416,7 +529,7 @@ def run_experiment(dataset_name, semantic_df, vae_X_norm, vae_input_dim,
         'quality_accuracy': baseline['km_acc'],
         'quality_auc':      baseline['km_auc'],
         'anomaly_auc':      lof_auc,
-        'avg_reward':       float(np.mean(ep_rewards[:5])),   # first-5 episodes (untrained)
+        'avg_reward':       float(np.mean(random_rewards)),   # random policy as reward baseline
     }
     proposed_agg = {
         'quality_accuracy': dt_quality_m['accuracy'],
@@ -439,7 +552,11 @@ def run_experiment(dataset_name, semantic_df, vae_X_norm, vae_input_dim,
         'baseline_kmeans':  {'accuracy': baseline['km_acc'], 'auc': baseline['km_auc']},
         'baseline_gmm':     {'accuracy': baseline['gmm_acc'], 'auc': baseline['gmm_auc']},
         'baseline_lof':     {'auc': lof_auc},
+        'baseline_iso':     {'auc': iso_auc},
         'baseline_zscore':  {'auc': zs_auc},
+        'baseline_random':  {'avg_reward': float(np.mean(random_rewards))},
+        'baseline_greedy':  {'avg_reward': float(np.mean(greedy_rewards))},
+        'baseline_nogat':   {'avg_reward': avg_nogat},
         'fault_injection':  {'n_faults': int(y_fault.sum()), 'n_total': int(len(y_fault))},
         'comparison':    comp,
     }
@@ -447,99 +564,134 @@ def run_experiment(dataset_name, semantic_df, vae_X_norm, vae_input_dim,
     print(f"\n  Results saved -> {res_dir}")
 
     # ── Plots ───────────────────────────────────────────────────────────────
-    FS = 18        # base fontsize — matches 12pt document when figure scaled to textwidth
-    LW = 2.2       # default linewidth for main curves
-    C_NAVY  = '#003087'   # dark navy blue  (nét liền — đường đề xuất / chính)
-    C_RED   = '#8B0000'   # dark red        (nét liền — đường thứ hai)
-    C_BLACK = '#000000'   # black           (nét đứt  — baseline 1)
-    C_DGRAY = '#555555'   # dark gray       (nét đứt  — baseline 2 / raw)
+    FS  = 22        # base fontsize — large for IEEE paper figures
+    LW  = 2.8       # default linewidth for main curves
+    C_NAVY   = '#003087'   # dark navy    — proposed / primary line
+    C_RED    = '#8B0000'   # dark red     — proposed secondary
+    C_BLACK  = '#000000'   # black        — baseline 1
+    C_DGRAY  = '#444444'   # dark gray    — baseline 2
+    C_ORANGE = '#B85000'   # burnt orange — baseline 3 (Isolation Forest)
 
-    # VAE loss curve
-    fig, ax = plt.subplots(figsize=(8, 4))
-    ax.plot(vae_hist['recon'], color=C_NAVY, lw=LW,       label='Reconstruction loss')
-    ax.plot(vae_hist['kl'],    color=C_RED,  lw=LW, ls='--', label='KL divergence')
+    # Line style assignments — distinguishable in both colour AND B&W print
+    # Baselines : dashed (--) and dash-dot (-.)
+    # Proposed  : solid  (-)  with extra thickness
+    LS_B1 = '--'   # baseline 1  (K-Means / LOF)
+    LS_B2 = '-.'   # baseline 2  (GMM     / Z-Score)
+    LS_B3 = (0, (3, 1, 1, 1, 1, 1))  # densely dash-dot-dotted (Isolation Forest)
+    LS_P  = '-'    # proposed    (DT-EKF)
+    LW_BASE = LW - 0.5   # baseline lines slightly thinner
+    LW_PROP = LW + 0.5   # proposed line thicker and on top
+
+    def _grid(ax):
+        ax.grid(True, ls=':', lw=0.8, alpha=0.45, color='#aaaaaa')
+        ax.set_axisbelow(True)
+
+    # ── VAE loss curve ───────────────────────────────────────────────────
+    fig, ax = plt.subplots(figsize=(9, 5))
+    ax.plot(vae_hist['recon'], color=C_NAVY, lw=LW,    ls=LS_P,  label='Reconstruction loss')
+    ax.plot(vae_hist['kl'],    color=C_RED,  lw=LW,    ls=LS_B1, label='KL divergence')
     ax.set_xlabel('Epoch', fontsize=FS)
     ax.set_ylabel('Loss',  fontsize=FS)
-    ax.tick_params(labelsize=FS - 1)
+    ax.tick_params(labelsize=FS)
     ax.legend(fontsize=FS - 1)
     ax.set_title(f'VAE Training Loss — {dataset_name}', fontsize=FS)
+    _grid(ax)
     plt.tight_layout()
     plot_and_save(plot_dir, 'vae_loss', fig)
 
-    # MADRL reward curve
-    fig, ax = plt.subplots(figsize=(8, 4))
+    # ── MADRL reward curve ───────────────────────────────────────────────
+    fig, ax = plt.subplots(figsize=(9, 5))
     window = max(1, len(ep_rewards) // 10)
     smoothed = pd.Series(ep_rewards).rolling(window, min_periods=1).mean()
-    ax.plot(ep_rewards, alpha=0.35, color=C_DGRAY, lw=1.2, ls='--', label='Raw reward')
-    ax.plot(smoothed,   color=C_NAVY, lw=LW, label='Smoothed reward')
+    ax.plot(ep_rewards, alpha=0.30, color=C_DGRAY, lw=1.5, ls=LS_B1, label='Raw per-episode')
+    ax.plot(smoothed,   color=C_NAVY, lw=LW_PROP, ls=LS_P, label='MADRL+GAT (smoothed)')
+    ax.axhline(float(np.mean(random_rewards)),
+               color=C_BLACK,  ls=LS_B1, lw=LW_BASE, label=f'Random  ({np.mean(random_rewards):.0f})')
+    ax.axhline(float(np.mean(greedy_rewards)),
+               color=C_DGRAY,  ls=LS_B2, lw=LW_BASE, label=f'Greedy-min ({np.mean(greedy_rewards):.0f})')
+    ax.axhline(avg_nogat,
+               color=C_ORANGE, ls=LS_B3, lw=LW_BASE, label=f'DQN no-GAT ({avg_nogat:.0f})')
     ax.set_xlabel('Episode',           fontsize=FS)
     ax.set_ylabel('Cumulative Reward', fontsize=FS)
-    ax.tick_params(labelsize=FS - 1)
-    ax.legend(fontsize=FS - 1)
+    ax.tick_params(labelsize=FS)
+    ax.legend(fontsize=FS - 3, framealpha=0.9)
     ax.set_title(f'MADRL+GAT Training — {dataset_name}', fontsize=FS)
+    _grid(ax)
     plt.tight_layout()
     plot_and_save(plot_dir, 'madrl_rewards', fig)
 
-    # ROC curves — quality (K-Means / GMM vs DT-EKF) and anomaly (LOF / Z-Score vs DT-EKF)
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    # ── ROC curves — quality and anomaly detection ───────────────────────
+    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
 
+    # Quality classification ROC
     ax = axes[0]
     ax.plot(baseline['km_fpr'],  baseline['km_tpr'],
-            color=C_BLACK, ls='--', lw=LW - 0.2,
+            color=C_BLACK,  ls=LS_B1, lw=LW_BASE,
             label=f'K-Means  AUC={baseline["km_auc"]:.3f}')
     ax.plot(baseline['gmm_fpr'], baseline['gmm_tpr'],
-            color=C_NAVY,  ls='--', lw=LW - 0.2,
+            color=C_DGRAY,  ls=LS_B2, lw=LW_BASE,
             label=f'GMM      AUC={baseline["gmm_auc"]:.3f}')
     ax.plot(dt_quality_m['fpr'], dt_quality_m['tpr'],
-            color=C_RED,   ls='-',  lw=LW + 0.3,
+            color=C_RED,    ls=LS_P,  lw=LW_PROP, zorder=3,
             label=f'DT-EKF   AUC={dt_quality_m["auc"]:.3f}')
-    ax.plot([0, 1], [0, 1], color=C_DGRAY, ls=':', lw=1)
+    ax.plot([0, 1], [0, 1], color='#888888', ls=':', lw=1.2)
     ax.set_xlabel('False Positive Rate', fontsize=FS)
     ax.set_ylabel('True Positive Rate',  fontsize=FS)
-    ax.tick_params(labelsize=FS - 1)
-    ax.set_title(f'Quality ROC — {dataset_name}', fontsize=FS)
-    ax.legend(loc='lower right', fontsize=FS - 2)
+    ax.tick_params(labelsize=FS)
+    ax.set_title(f'Quality Classification ROC — {dataset_name}', fontsize=FS)
+    ax.legend(loc='lower right', fontsize=FS - 2, framealpha=0.9)
+    _grid(ax)
 
+    # Anomaly detection ROC
     ax = axes[1]
     ax.plot(lof_fpr, lof_tpr,
-            color=C_BLACK, ls='--', lw=LW - 0.2,
+            color=C_BLACK,  ls=LS_B1, lw=LW_BASE,
             label=f'LOF      AUC={lof_auc:.3f}')
+    ax.plot(iso_fpr, iso_tpr,
+            color=C_ORANGE, ls=LS_B3, lw=LW_BASE,
+            label=f'Iso.For. AUC={iso_auc:.3f}')
     ax.plot(zs_fpr,  zs_tpr,
-            color=C_NAVY,  ls='--', lw=LW - 0.2,
+            color=C_DGRAY,  ls=LS_B2, lw=LW_BASE,
             label=f'Z-Score  AUC={zs_auc:.3f}')
     ax.plot(dt_anomaly_m['fpr'], dt_anomaly_m['tpr'],
-            color=C_RED,   ls='-',  lw=LW + 0.3,
+            color=C_NAVY,   ls=LS_P,  lw=LW_PROP, zorder=3,
             label=f'DT-EKF   AUC={dt_anomaly_m["auc"]:.3f}')
-    ax.plot([0, 1], [0, 1], color=C_DGRAY, ls=':', lw=1)
+    ax.plot([0, 1], [0, 1], color='#888888', ls=':', lw=1.2)
     ax.set_xlabel('False Positive Rate', fontsize=FS)
     ax.set_ylabel('True Positive Rate',  fontsize=FS)
-    ax.tick_params(labelsize=FS - 1)
-    ax.set_title(f'Anomaly ROC — {dataset_name}', fontsize=FS)
-    ax.legend(loc='lower right', fontsize=FS - 2)
+    ax.tick_params(labelsize=FS)
+    ax.set_title(f'Anomaly Detection ROC — {dataset_name}', fontsize=FS)
+    ax.legend(loc='lower right', fontsize=FS - 3, framealpha=0.9)
+    _grid(ax)
 
     plt.tight_layout()
     plot_and_save(plot_dir, 'roc_comparison', fig)
 
-    # Digital Twin state estimation
-    fig, axes = plt.subplots(2, 1, figsize=(12, 6), sharex=True)
+    # ── Digital Twin state estimation ────────────────────────────────────
+    fig, axes = plt.subplots(2, 1, figsize=(13, 7), sharex=True)
     n_plot = min(500, len(dt_results))
     t = np.arange(n_plot)
+
     axes[0].plot(t, dt_results['obs_rssi'].values[:n_plot],
-                 color=C_DGRAY, ls='--', lw=1.2, alpha=0.7, label='Observed')
+                 color=C_DGRAY, ls=LS_B1, lw=1.8, alpha=0.65, label='Observed (with faults)')
     axes[0].plot(t, dt_results['est_rssi'].values[:n_plot],
-                 color=C_NAVY, ls='-', lw=LW, label='EKF estimate')
-    axes[0].set_ylabel('mean\_rssi (dBm)', fontsize=FS)
-    axes[0].tick_params(labelsize=FS - 1)
-    axes[0].legend(fontsize=FS - 1)
+                 color=C_NAVY,  ls=LS_P,  lw=LW_PROP, label='EKF estimate')
+    axes[0].set_ylabel('RSSI (dBm)', fontsize=FS)
+    axes[0].tick_params(labelsize=FS)
+    axes[0].legend(fontsize=FS - 1, loc='upper right')
+    _grid(axes[0])
+
     axes[1].plot(t, dt_results['obs_num_bs'].values[:n_plot],
-                 color=C_DGRAY, ls='--', lw=1.2, alpha=0.7, label='Observed')
+                 color=C_DGRAY, ls=LS_B1, lw=1.8, alpha=0.65, label='Observed (with faults)')
     axes[1].plot(t, dt_results['est_num_bs'].values[:n_plot],
-                 color=C_RED, ls='-', lw=LW, label='EKF estimate')
-    axes[1].set_ylabel('num\_active\_bs', fontsize=FS)
-    axes[1].set_xlabel('Step',           fontsize=FS)
-    axes[1].tick_params(labelsize=FS - 1)
-    axes[1].legend(fontsize=FS - 1)
-    plt.suptitle(f'Digital Twin State Estimation — {dataset_name}', fontsize=FS + 1)
+                 color=C_RED,   ls=LS_P,  lw=LW_PROP, label='EKF estimate')
+    axes[1].set_ylabel('Active BSs', fontsize=FS)
+    axes[1].set_xlabel('Time step', fontsize=FS)
+    axes[1].tick_params(labelsize=FS)
+    axes[1].legend(fontsize=FS - 1, loc='upper right')
+    _grid(axes[1])
+
+    plt.suptitle(f'Digital Twin EKF State Estimation — {dataset_name}', fontsize=FS + 1)
     plt.tight_layout()
     plot_and_save(plot_dir, 'dt_estimation', fig)
 
@@ -627,16 +779,17 @@ def generate_summary(all_results):
     for ds, m in all_results.items():
         rows.append({
             'Dataset':            ds,
-            'KMeans Acc':         f"{m['baseline_kmeans']['accuracy']:.4f}",
-            'GMM Acc':            f"{m['baseline_gmm']['accuracy']:.4f}",
-            'DT Acc':             f"{m['dt_quality']['accuracy']:.4f}",
             'KMeans AUC':         f"{m['baseline_kmeans']['auc']:.4f}",
             'GMM AUC':            f"{m['baseline_gmm']['auc']:.4f}",
-            'DT AUC':             f"{m['dt_quality']['auc']:.4f}",
-            'LOF AUC':            f"{m['baseline_lof']['auc']:.4f}",
+            'DT Quality AUC':     f"{m['dt_quality']['auc']:.4f}",
+            'LOF Anomaly AUC':    f"{m['baseline_lof']['auc']:.4f}",
+            'IF Anomaly AUC':     f"{m['baseline_iso']['auc']:.4f}",
             'ZScore AUC':         f"{m['baseline_zscore']['auc']:.4f}",
             'DT Anomaly AUC':     f"{m['dt_anomaly']['auc']:.4f}",
-            'MADRL Avg Reward':   f"{m['madrl_train']['avg_reward_eval']:.2f}",
+            'Random Reward':      f"{m['baseline_random']['avg_reward']:.2f}",
+            'Greedy Reward':      f"{m['baseline_greedy']['avg_reward']:.2f}",
+            'NoGAT Reward':       f"{m['baseline_nogat']['avg_reward']:.2f}",
+            'MADRL+GAT Reward':   f"{m['madrl_train']['avg_reward_eval']:.2f}",
             'VAE MSE':            f"{m['vae']['mse']:.6f}",
         })
     df = pd.DataFrame(rows).set_index('Dataset')

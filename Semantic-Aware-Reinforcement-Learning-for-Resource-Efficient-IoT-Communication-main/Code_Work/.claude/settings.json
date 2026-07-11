@@ -1,7 +1,10 @@
 {
   "permissions": {
     "allow": [
-      "WebFetch(domain:dl.acm.org)"
+      "WebFetch(domain:dl.acm.org)",
+      "Bash(python -c ' *)",
+      "Bash(ls \"d:/Workspace/demogit/Semantic-Aware-Reinforcement-Learning-for-Resource-Efficient-IoT-Communication-main/Code_Work/Data_3/\" && echo \"---\" && ls \"d:/Workspace/demogit/Semantic-Aware-Reinforcement-Learning-for-Resource-Efficient-IoT-Communication-main/\")",
+      "Read(//d/Workspace/demogit/Semantic-Aware-Reinforcement-Learning-for-Resource-Efficient-IoT-Communication-main/**)"
     ]
   }
 }

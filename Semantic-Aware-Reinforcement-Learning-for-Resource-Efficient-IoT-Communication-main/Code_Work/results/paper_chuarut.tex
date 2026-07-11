@@ -1,0 +1,1028 @@
+\documentclass[conference]{IEEEtran}
+\IEEEoverridecommandlockouts
+
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{algorithmic}
+\usepackage{algorithm}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage[caption=false,font=footnotesize]{subfig}
+\usepackage{xcolor}
+\usepackage{cite}
+\usepackage{url}
+\usepackage{bm}
+\usepackage{float}
+\usepackage{tikz}
+\usetikzlibrary{positioning,arrows.meta,fit,backgrounds}
+
+\graphicspath{{figures/}}
+\raggedbottom
+% ============================================================
+\title{Digital Twins and Multi-Agent Reinforcement Learning for IoT Resource Allocation}
+% ============================================================
+\author{
+Thi Huyen Trang Nguyen\textsuperscript{1}, 
+Trong Binh Hoang\textsuperscript{1}, 
+Quoc Khanh Nguyen\textsuperscript{1},\\ 
+Van Khuong Ngo\textsuperscript{2}, 
+Van Tiep Pham\textsuperscript{2}, and 
+Van Linh Dinh\textsuperscript{2} \\[1em]
+
+\normalsize
+\textsuperscript{1}Le Quy Don Technical University, Hanoi, Vietnam\\
+\textsuperscript{2}Academy of Cryptography Techniques, Hanoi, Vietnam\\[0.5em]
+
+\textsuperscript{*}Corresponding authors: vanlinh@actvn.edu.vn, binhht99@lqdtu.edu.vn, trangcucheng@gmail.com}
+% ============================================================
+\begin{document}
+\maketitle
+\begin{abstract}
+% ============================================================
+Effective IoT network management requires simultaneous semantic feature
+compression, real-time channel quality monitoring, anomaly detection, and
+adaptive resource allocation. Existing approaches address these tasks in
+isolation, lacking a unified system that jointly exploits temporal dynamics
+and multi-agent coordination. In this paper, a three-stage framework is proposed that integrates
+Variational Autoencoder (VAE)-based semantic compression, an Extended Kalman Filter (EKF)-based Digital Twin for joint
+quality monitoring and anomaly detection, and Multi-Agent Deep Reinforcement Learning (MADRL) with Graph Attention
+Networks (MADRL-GAT) for cooperative resource allocation.
+Experiments on three heterogeneous real-world IoT datasets
+including Sigfox Antwerp, LoRaWAN Italy, and Indoor demonstrate that the proposed
+EKF-based Digital Twin substantially outperforms unsupervised clustering baselines
+(K-Means, GMM) in quality classification and delivers competitive anomaly detection
+against dedicated single-task detectors including LOF, Isolation Forest, Z-Score, while
+being the only evaluated method to jointly deliver both capabilities in a single
+recursive filter pass without requiring labeled fault data. MADRL-GAT achieves
+stable policy convergence across all settings, and the full pipeline operates in
+real time on CPU, confirming practical suitability and cross-technology
+generalization across heterogeneous IoT deployments.
+\end{abstract}
+
+\begin{IEEEkeywords}
+Internet of Things, digital twin, multi-agent reinforcement learning, IoT resource allocation, IoT security
+\end{IEEEkeywords}
+
+\section{Introduction}
+\label{sec:intro}
+
+The explosive growth of IoT deployments, which spans smart
+cities, industrial sensing, and indoor positioning, has introduced
+unprecedented demands on wireless network infrastructure~\cite{ref_iot_overview}. Devices operating
+across heterogeneous technologies such as Sigfox, LoRaWAN, and WiFi
+continuously generate high-dimensional telemetry streams that must be
+processed, monitored, and acted upon with minimal latency and energy
+overhead. Two fundamental challenges arise: the raw
+feature space is high-dimensional and noisy, making downstream learning
+inefficient, and the network state evolves continuously over time, subject to both
+signal quality degradation and potential adversarial anomalies. Without
+mechanisms that simultaneously monitor connection quality and detect
+abnormal behaviour, resource allocation decisions risk being
+systematically misguided or exploited.
+
+A natural approach to the dimensionality challenge is to extract compact,
+task-relevant representations from raw sensor observations before any
+downstream processing. Liu et al.~\cite{ref_vae_wireless} proposed a
+task-adaptive semantic compression scheme employing a VAE to encode raw sensor observations into compact representations,
+substantially reducing communication overhead in resource-constrained
+networks. The compression rate adapts to instantaneous channel quality,
+yielding strong reconstruction fidelity across diverse wireless conditions.
+However, this scheme targets static point-to-point links without temporal
+state tracking, provides no anomaly-detection capability, and does not
+coordinate multiple agents, which restricts its applicability to the dynamic,
+heterogeneous IoT settings addressed in this work.
+
+Beyond feature compression, Deep Reinforcement Learning (DRL) has emerged as a leading approach to
+adaptive resource management under time-varying interference, with
+multi-agent formulations enabling distributed control across heterogeneous
+wireless settings~\cite{ref_drl_comm2}. In the IoT domain,
+Xiong et al.~\cite{ref_drl_iot} proposed a DRL-based resource allocation framework for IoT edge computing,
+demonstrating adaptive multi-resource management under dynamic task arrivals and heterogeneous device requirements.
+A key limitation of this approach is that
+raw, high-dimensional feature vectors serve as the agent state without
+semantic compression, inflating the effective state space and degrading
+sample efficiency. Moreover, no channel-quality feedback enters the reward
+signal, preventing the agent from distinguishing nominal from degraded
+link conditions. These shortcomings motivate coupling feature compression
+with a predictive channel model before resource allocation.
+More recently, Wali et al.~\cite{ref_wali2025} proposed a semantic-aware hybrid framework on the same
+Sigfox and LoRaWAN datasets, integrating a single-agent DQN with supervised Random Forest
+classification and Isolation Forest anomaly detection.
+While this work demonstrates the value of combining semantic features with ensemble learning,
+it relies on labeled signal-quality annotations for the classification stage, operates with a
+single RL agent without inter-agent coordination, and does not employ a principled temporal
+state estimator for channel monitoring. These constraints limit its applicability in
+label-scarce, multi-device IoT deployments, motivating the fully unsupervised and
+multi-agent design proposed in this work.
+
+Digital twin (DT) technology has emerged as a powerful paradigm for
+real-time monitoring and prediction in IoT deployments, enabling
+softwarized replicas of physical systems that continuously synchronize
+with their physical counterparts~\cite{ref_dt_iot}.
+Applied to wireless resource management, DT-based approaches use predicted
+channel states to guide allocation decisions ahead of reactive baselines.
+Among these, Tang et al.~\cite{ref_dt_resource} combined a DT with distributed deep reinforcement learning
+for resource allocation in industrial IoT network slicing, achieving predictive resource control that
+substantially outperforms non-predictive baselines. Nevertheless,
+quality classification in such systems relies on fixed decision thresholds that cannot
+adapt to heterogeneous dataset statistics, anomaly detection is absent,
+and raw features are fed directly to the allocation module without
+semantic compression, leaving these systems unable to flag silent sensor
+faults or generalize across heterogeneous channel conditions.
+
+The most closely related integrated framework is that of Hazarika
+et al.~\cite{ref_semadt}, which combined semantic compression, predictive
+DT forecasting, and MADRL with a graph neural network (GNN)
+for maritime search-and-rescue IoT operations, demonstrating that semantic
+state inputs and DT-predicted quality signals together substantially outperform
+non-predictive Multi-Agent Reinforcement Learning (MARL) baselines. Despite this advance, the Graph Convolutional Network (GCN) layer applies
+symmetric neighborhood aggregation without capturing heterogeneous inter-agent
+relationship strengths, whereas Graph Attention Networks (GAT)~\cite{ref_gat_comm}
+do so via learned attention weights, enabling each agent to selectively
+emphasize the most relevant neighbors (e.g., strongly interfering or
+heavily loaded nodes) and thereby make more informed resource allocation
+decisions in heterogeneous IoT deployments. In addition, the anomaly detector uses a single hand-picked scalar
+cutoff applied to a univariate signal, which ignores the joint
+covariance structure of the latent state vector and lacks the
+statistical guarantees of a multivariate test such as the
+chi-squared-based Normalized Innovation Squared (NIS) criterion~\cite{ref_ekf}.
+Finally, experiments are conducted exclusively on a maritime
+search-and-rescue scenario, so it remains unknown whether the
+approach generalises to other IoT technologies such as LoRaWAN
+or WiFi-based sensor networks.
+
+In general, three critical gaps remain in the existing literature. First,
+the broader literature largely treats semantic compression, DT
+forecasting, and multi-agent resource allocation as independent
+modules~\cite{ref_vae_wireless,ref_dt_iot,ref_dt_resource}. Even the
+most integrated recent system~\cite{ref_semadt} lacks an explicit feedback
+path in which anomaly signals from the DT are fed back into
+the resource allocation reward. Second, existing DT implementations
+address either quality classification or anomaly detection in
+isolation~\cite{ref_dt_resource,ref_anomaly_survey}, rather than jointly performing
+both within a single principled state estimator. Third, cross-technology
+generalizability across heterogeneous IoT protocols (Sigfox, LoRaWAN, WiFi)
+remains unexplored, as prior integrated systems have been validated only
+in a single domain~\cite{ref_semadt}.
+
+In this paper, a unified three-stage intelligent framework is proposed to
+simultaneously address the above gaps. To close the first gap, a
+VAE establishes a continuous, differentiable
+feedback path from raw IoT measurements to compact semantic latent codes
+that are shared across all downstream stages. To close the second gap,
+an EKF-based DT jointly performs
+connection quality classification and anomaly detection within a single
+principled state estimator, coupling both outputs into a unified signal.
+To close the third gap, a MADRL-GAT module coordinates
+resource allocation across heterogeneous IoT devices by consuming the
+semantic codes, quality labels, and anomaly flags produced upstream,
+and is validated across three distinct wireless technologies. The proposed framework is evaluated on three real-world IoT datasets
+spanning heterogeneous wireless technologies: Sigfox
+Antwerp~\cite{ref_sigfox}, LoRaWAN Italy~\cite{ref_lorawan}, and
+Indoor WiFi~\cite{ref_indoor}. Results demonstrate that the EKF-based
+DT consistently outperforms classical clustering baselines in
+both quality classification and anomaly detection, while the MADRL-GAT
+module converges stably and achieves high cumulative rewards across all
+three datasets, confirming the effectiveness of the integrated
+semantic-and quality-aware design.
+
+The main contributions are summarized as follows:
+\begin{itemize}
+\item A unified three-stage pipeline is proposed that couples VAE semantic
+compression, EKF DT monitoring, and MADRL-GAT resource allocation,
+with compressed latent codes serving as both agent state and quality-aware
+reward input.
+\item An EKF-based DT is designed to jointly perform quality
+classification and anomaly detection in a single recursive estimation pass.
+Quality thresholds are set automatically via Youden's J~\cite{ref_youden}, and anomalies are
+scored via the NIS chi-squared test, providing statistically principled fault
+detection absent in prior fixed-threshold DT systems.
+\item Experiments on three heterogeneous real-world IoT datasets (Sigfox
+Antwerp, LoRaWAN Italy, Indoor) show that the EKF DT outperforms
+K-Means and GMM on quality classification AUC across all datasets, and
+achieves anomaly detection AUC of 0.987 on Indoor, while MADRL-GAT converges
+stably within 50 episodes.
+\end{itemize}
+
+The remainder of this paper is organised as follows. Section~\ref{sec:model}
+presents the system model. Section~\ref{sec:problem} formulates the
+optimization problem. Section~\ref{sec:method} details the proposed framework.
+Section~\ref{sec:experiments} reports experimental results.
+Section~\ref{sec:conclusion} concludes the paper.
+
+\section{System Model}
+\label{sec:model}
+% ============================================================
+
+\subsection{IoT Network Model}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{figures/iotnodes.pdf}
+  \caption{Heterogeneous IoT network model with three wireless technologies.}
+  \label{fig:iotnodes}
+\end{figure}
+
+The system consists of a heterogeneous IoT network comprising $N$ nodes
+indexed by $i\in\{1,\ldots,N\}$, where each node periodically transmits
+sensor readings over a wireless channel to a gateway or base station. Let
+$\mathbf{x}_i(t)\in\mathbb{R}^d$ denote the raw feature vector
+observed by node $i$ at time $t$, comprising signal strength measurements
+and sensor readings (e.g., RSSI per base station, SNR, temperature,
+humidity, battery level).
+
+\subsection{Channel Quality State Model}
+
+The quality of the wireless link for node $i$ is characterized by two
+key indicators: RSSI and the number of active base stations $n^{\rm BS}_i(t)$.
+These form the two-dimensional channel state
+$\mathbf{s}_i(t)=[{\rm RSSI}_i(t),\;n^{\rm BS}_i(t)]^\top$, which is
+the input to the DT-EKF (Section~\ref{sec:dt}).
+Since no ground-truth quality annotations are available, pseudo binary
+labels are constructed from the raw RSSI for evaluation purposes only.
+A sample is labeled good quality if ${\rm RSSI}_i(t)\geq\tau_i$.
+The natural class distribution is severely imbalanced: for Sigfox Antwerp,
+only 1.9\% of samples exceed the standard Sigfox link-budget threshold of
+$-$130~dBm, rendering standard accuracy and Area Under the Curve (AUC) metrics unreliable.
+To obtain stable, balanced evaluation labels, $\tau_i$ is therefore set
+to the sample median of RSSI observations in each dataset, which
+guarantees approximately 50\% positive labels by construction regardless
+of the underlying distribution shape. These median-derived pseudo-labels
+serve exclusively as the reference for computing AUC and accuracy in
+Table~\ref{tab:main_results}. Separately, the DT-EKF derives
+its own classification threshold $\tau^*$ via Youden's J
+(Section~\ref{sec:dt}), optimizing True Positive Rate (TPR)$-$False Positive Rate (FPR) on the filtered state
+estimate $\widehat{\rm RSSI}_{t|t}$ against these same pseudo-labels.
+
+\subsection{Resource Allocation and Communication Model}
+
+At each decision epoch, node $i$ selects a discrete action
+$a_i(t)\in\{1,\ldots,A\}$ representing its resource configuration
+(e.g., transmission power level, spreading factor, or channel index).
+Because the three real-world datasets provide empirical RSSI measurements
+rather than explicit channel coefficients, the normalized raw RSSI
+$\bar{s}_i(t)\in[0,1]$ serves as a tractable, scale-invariant proxy
+for link quality in the reward signal, as detailed in
+Section~\ref{sec:method}. Nodes are connected through a graph
+$\mathcal{G}=(\mathcal{V},\mathcal{E},\mathbf{A})$, where the adjacency
+matrix $\mathbf{A}$ encodes inter-node relationships.
+For Sigfox Antwerp, $\mathbf{A}$ is derived from RSSI cross-correlation
+among the top-10 most active base stations, reflecting co-coverage
+structure where correlated nodes likely share overlapping BS footprints
+and mutually cause interference.
+For LoRaWAN and Indoor, $\mathbf{A}$ is set to fully-connected, as the
+low input dimensionality (5 features) provides insufficient basis for
+reliable pairwise correlation estimation, and the small agent count
+makes full connectivity computationally negligible.
+Fig.~\ref{fig:graph_adj} illustrates the two adjacency construction policies.
+
+\begin{figure}[t]
+  \centering
+  % Compile fig_graph_construction.tex as standalone PDF,
+  % then upload fig_graph_construction.pdf to the figures/ folder on Overleaf.
+  \includegraphics[width=\columnwidth]{fig_graph_construction}
+  \caption{Graph adjacency construction for
+  $\mathcal{G}=(\mathcal{V},\mathcal{E},\mathbf{A})$.}
+  \label{fig:graph_adj}
+\end{figure}
+
+\subsection{Fault Model}
+
+To evaluate anomaly detection in the absence of naturally labeled faults,
+synthetic anomalies are injected into 5\% of each time-ordered sequence
+via three fault types, each shifting the RSSI within $\pm2\sigma$ of the
+global distribution to avoid trivially detectable outliers.
+The 5\% injection rate follows standard anomaly detection practice~\cite{ref_anomaly_survey}
+and reflects realistic IoT fault prevalence, where silent hardware and link faults
+typically account for 1--5\% of transmissions in deployed networks.
+Fault magnitudes are bounded at $\pm2\sigma$ because this boundary corresponds
+to the 95th percentile of a Gaussian distribution, placing injected values
+at the edge of the plausible data envelope rather than in the extreme tail.
+Exceeding this bound (e.g., $\pm3\sigma$ or beyond) would produce
+outliers detectable by any simple threshold rule, eliminating the ability
+to differentiate methods. A reduced magnitude of $1.5\sigma$ is used for
+the stuck fault, which represents gradual sensor drift rather than an
+abrupt event. The three fault types are:
+\begin{itemize}
+  \item Spike (interference): RSSI is raised to
+    $\mu_{\rm RSSI}+2\sigma_{\rm RSSI}$, simulating a sudden surge
+    caused by co-channel interference.
+  \item Drop (attenuation): RSSI is lowered to
+    $\mu_{\rm RSSI}-2\sigma_{\rm RSSI}$ and $n^{\rm BS}_i$ is set to
+    zero, simulating abrupt signal loss.
+  \item Stuck (sensor drift): RSSI is fixed at
+    $\mu_{\rm RSSI}+1.5\sigma_{\rm RSSI}$ and $n^{\rm BS}_i$ is set to
+    zero, simulating a sensor that stops updating its reading.
+\end{itemize}
+
+% ============================================================
+\section{Problem Formulation}
+\label{sec:problem}
+% ============================================================
+
+Solving simultaneously for the VAE parameters $(\phi,\theta)$
+and the multi-agent actions $\{a_i\}$ in a single joint pass is
+computationally intractable and prone to gradient instability. The
+problem is therefore decomposed into a \textit{sequential two-phase
+paradigm} (Fig.~\ref{fig:framework}).
+Phase~1 trains the VAE offline to maximize the standard Evidence Lower BOund (ELBO)~\cite{ref_vae},
+then freezes the encoder. Phase~2 optimizes the per-agent actions
+$\{a_i(t)\}$ via the decentralized RL problem:
+\begin{equation}
+(\mathcal{P}_{\rm RL})\!:\;\max_{\{a_i\}}\; \mathbb{E}\!\left[\sum_{t=0}^{T}\sum_{i=1}^{N} r_i(t) \;\Bigg|\; \hat{\mathbf{z}}_i(t)=\bm{\mu}_{\phi^*}(\mathbf{x}_i(t))\right]
+\label{eq:rl_opt}
+\end{equation}
+where $r_i(t)$ is the per-agent reward defined in Section~\ref{sec:method},
+quality labels satisfy $\hat{q}_i(t)=\mathbf{1}[\widehat{\rm RSSI}_{i,t}\geq\tau^*]$
+with $\tau^*$ from Youden's J (Section~\ref{sec:dt}), and
+$a_i(t)\in\{1,\ldots,A\}$. This decoupled formulation guarantees
+convergence and practical feasibility.
+
+% ============================================================
+\section{Proposed Framework}
+\label{sec:method}
+% ============================================================
+
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=\textwidth]{figures/lưu_đồ_thuật_toán (3).pdf}
+  \caption{Overview of the proposed framework.}
+  \label{fig:framework}
+\end{figure*}
+
+Fig.~\ref{fig:framework} illustrates the overall architecture. The VAE
+is pre-trained offline. At runtime, the frozen encoder projects each
+observation $\mathbf{x}_i(t)$ to a semantic latent code
+$\hat{\mathbf{z}}_i(t)$ that feeds the MADRL agents. Concurrently, the
+observation sequence $\mathbf{s}_i(t)$ drives the DT-EKF, whose
+quality labels shape the agent reward signal. The three stages are detailed
+below.
+
+\subsection{Stage 1: Semantic Feature Compression via VAE}
+
+The VAE is trained offline following the standard ELBO
+objective~\cite{ref_vae}. At inference, the frozen encoder maps each
+raw observation $\mathbf{x}_i(t)\in\mathbb{R}^d$ to a compact
+deterministic latent code
+$\hat{\mathbf{z}}_i(t)=\bm{\mu}_\phi(\mathbf{x}_i(t))\in\mathbb{R}^{d_z}$,
+which serves as the MADRL agent state. The latent dimension $d_z$ is
+the smallest value that keeps reconstruction mean squared error (MSE) within an acceptable
+bound: $84\to16$ for Sigfox Antwerp (spatially sparse 84-BS signatures)
+and $5\to3$ for LoRaWAN and Indoor (already compact telemetry).
+
+\subsection{Stage 2: EKF-Based Digital Twin}
+\label{sec:dt}
+
+Unlike static classifiers that process each observation in isolation,
+the DT (DT-EKF) maintains a \textit{dynamic} estimate of
+$\mathbf{s}_i(t)=[{\rm RSSI}_i(t),\,n^{\rm BS}_i(t)]^\top$
+(in linear mW domain) through a recursive EKF~\cite{ref_ekf},
+providing three capabilities unavailable in static methods:
+(i)~adaptive noise weighting via the time-varying Kalman gain,
+(ii)~statistically principled anomaly scoring via the NIS chi-squared test,
+and (iii)~data-adaptive quality threshold via Youden's J.
+
+The proposed nonlinear state transition for the RSSI component is:
+\begin{equation}
+s^{(1)}_i(t+1) = s^{(1)}_i(t)
+  + \alpha\tanh\!\Bigl(\tfrac{\mu_i - s^{(1)}_i(t)}{\sigma_i}\Bigr)
+  + w^{(1)}_t,
+\label{eq:ss1}
+\end{equation}
+where $\mu_i$, $\sigma_i$ are the dataset RSSI mean and standard deviation
+and $\alpha{=}0.3$ is the mean-reversion strength. This
+Ornstein-Uhlenbeck-like tanh term captures mean-reverting channel dynamics
+with saturation at the signal boundary. The base-station count
+$s^{(2)}_i$ follows a standard random walk. The observation model is
+$\mathbf{o}_i(t)=\mathbf{s}_i(t)+\mathbf{v}(t)$ (identity mapping),
+where $\mathbf{o}_i(t)$ is the noisy channel measurement (distinct from
+the VAE code $\hat{\mathbf{z}}_i(t)$). Because the transition Jacobian
+$\mathbf{F}_t$ changes at every step due to the tanh nonlinearity, full
+EKF linearization~\cite{ref_ekf} is required rather than a standard Kalman Filter (KF).
+
+\textit{Anomaly detection.}
+The NIS statistic is:
+\begin{equation}
+\xi_t = \mathbf{y}_t^\top \mathbf{S}_t^{-1} \mathbf{y}_t \sim \chi^2(2)
+\label{eq:nis}
+\end{equation}
+under the no-fault hypothesis, where $\mathbf{y}_t$ is the EKF innovation
+and $\mathbf{S}_t$ its covariance~\cite{ref_ekf}. Step $t$ is flagged
+anomalous if $\xi_t > \chi^2_{0.95}(2) \approx 5.99$, controlling the
+false-alarm rate at 5\%.
+
+\textit{Quality classification.}
+The EKF-estimated power $\hat{s}^{(1)}_{t|t}$ (mW) is converted to dBm
+as $\widehat{\rm RSSI}_{t}=10\log_{10}(\hat{s}^{(1)}_{t|t})$.
+Because EKF smoothing shifts the filtered RSSI distribution relative to
+the raw signal, the classification threshold $\tau^*$ is derived on the
+EKF output via Youden's J, $\tau^*=\arg\max_\tau[\mathrm{TPR}(\tau)-\mathrm{FPR}(\tau)]$,
+evaluated against the median-derived pseudo-labels from
+Section~\ref{sec:model}. This two-step strategy (median threshold for
+reference labels, Youden's J for EKF classifier) removes systematic
+smoothing bias without manual calibration.
+
+\subsection{Stage 3: MADRL with Graph Attention Network}
+
+\textit{State and action.}
+Agent $i$'s local state at time $t$ is the VAE latent code
+$\hat{\mathbf{z}}_i(t)\in\mathbb{R}^{d_z}$, where $d_z=16$ for
+Sigfox Antwerp and $d_z=3$ for LoRaWAN Italy and Indoor
+(see Table~\ref{tab:config}). Agents are connected in
+graph $\mathcal{G}$ and each selects action $a_i(t)\in\{1,\ldots,A\}$.
+The EKF quality label $\hat{q}_i(t)$ and anomaly flag $\xi_i(t)$ from
+Stage~2 enter the learning signal via the reward rather than the state
+vector. This keeps the state compact but means agents cannot proactively
+branch on anomaly information before receiving delayed reward feedback,
+a limitation identified as future work (Section~\ref{sec:experiments}).
+
+\textit{GAT encoder.}
+Agent representations are aggregated via standard GAT~\cite{ref_gat_comm},
+producing attention-weighted neighborhood embeddings that allow each agent
+to selectively emphasize the most relevant neighbors (e.g., strongly
+interfering or heavily loaded nodes) rather than applying uniform aggregation.
+
+\textit{DQN training.}
+Each agent maintains an independent Q-network $Q_i(\cdot;\bm{\theta}_i)$
+trained via the standard DQN Bellman loss with discount factor $\gamma$
+and a periodically updated target network $\bm{\theta}_i^-$
+to stabilize training. The per-agent reward models an adaptive
+power-control trade-off: higher resource action boosts effective signal
+quality when the channel is weak, but always incurs a resource cost:
+\vspace{-4pt}
+\begin{equation}
+r_i(t) = 5\,\tilde{s}_i(t) + 2\,\bar{n}_i(t)
+        - 3\,\bar{a}(t)
+        + \max\!\bigl(0,\,1 - \tfrac{\sigma_a(t)}{2}\bigr),
+\label{eq:reward}
+\end{equation}
+\vspace{-2pt}
+where $\bar{s}_i(t)=\mathrm{clip}\!\bigl(({\rm RSSI}_i(t)+145)/95,0,1\bigr)\in[0,1]$
+is the RSSI normalized to $[-145,-50]$~dBm, avoiding any sign ambiguity
+and ensuring scale-invariant reward regardless of deployment distance,
+$\tilde{s}_i(t)=\bar{s}_i(t)+\bar{a}(t)(1-\bar{s}_i(t))$ is the
+effective normalized RSSI boosted by mean action
+$\bar{a}(t)=(1/N)\sum_i a_i(t)/(A{-}1)\in[0,1]$
+proportional to channel need $(1-\bar{s}_i)$,
+$\bar{n}_i(t)=\min(n_i^{\rm BS}/20,1)$ is the normalized active-BS count,
+and $\sigma_a(t)$ is the cross-agent action standard deviation.
+The total reward lies in $[-3,\,8]$, requiring no additional clipping.
+This design creates a data-driven cross-over: when the channel is poor
+(low $\bar{s}_i$), boosting resources yields a net gain. When the
+channel is good, conservative allocation is optimal.
+
+\begin{table}[t]
+\centering
+\caption{Dataset Characteristics and Hyperparameters}
+\label{tab:config}
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Parameter} & \textbf{Antwerp} & \textbf{LoRaWAN} & \textbf{Indoor}\\
+\midrule
+Technology           & Sigfox  & LoRaWAN & WiFi   \\
+Samples $N$          & 14,377  & 190,502 & 1,100  \\
+VAE input dim $d$    & 84      & 5       & 5      \\
+VAE latent dim $d_z$ & 16      & 3       & 3      \\
+$\sigma_Q$           & 0.5     & 0.3     & 0.2    \\
+$\sigma_R$           & 0.5     & 0.4     & 0.8    \\
+Agents $N$           & 5       & 5       & 5      \\
+Actions $A$          & 5       & 5       & 5      \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{algorithm}[H]
+\caption{Proposed Framework: Training Procedure}
+\label{alg:main}
+\begin{algorithmic}[1]
+\REQUIRE Dataset $\mathcal{D}$; config $\{d_z,\sigma_Q,\sigma_R,\varepsilon_0,\gamma,N_{\rm ep}\}$
+\STATE // Stage 1: VAE pre-training
+\STATE Normalise $\mathbf{X}\leftarrow(\mathbf{X}-\mu)/\sigma$
+\FOR{epoch $e=1$ \textbf{to} $E_{\rm VAE}$}
+  \STATE Minimise $-\mathcal{L}(\phi,\theta;\mathbf{X})$ via Adam
+\ENDFOR
+\STATE Freeze encoder; extract $\hat{\mathbf{Z}}=\bm{\mu}_\phi(\mathbf{X})$
+\STATE // Stage 2: DT-EKF calibration
+\STATE Run EKF on $\{\mathbf{s}_i(t)\}$ following~\cite{ref_ekf}
+\STATE Compute $\tau^*$ via Youden's J
+\STATE // Stage 3: MADRL-GAT training
+\STATE Init $\{Q_i,\mathcal{B}_i\}_{i=1}^N$; $\varepsilon\leftarrow\varepsilon_0$
+\FOR{episode $e=1$ \textbf{to} $N_{\rm ep}$}
+  \FOR{each time step $t$}
+    \STATE Encode graph via GAT~\cite{ref_gat_comm}
+    \STATE Select $a_i$ via $\varepsilon$-greedy; observe $r_i(t)$ via (\ref{eq:reward})
+    \STATE Store in $\mathcal{B}_i$; update $Q_i$ via DQN Bellman loss
+  \ENDFOR
+  \STATE Decay $\varepsilon$; soft-update $\bm{\theta}_i^-$
+\ENDFOR
+\end{algorithmic}
+\end{algorithm}
+
+% ============================================================
+\section{Experimental Results}
+\label{sec:experiments}
+% ============================================================
+
+\subsection{Experimental Settings}
+
+Experiments run on a CPU-only workstation (Python 3.11, PyTorch 2.x,
+scikit-learn). Table~\ref{tab:config} summarizes the per-dataset
+hyperparameters. The VAE trains for 30 epochs with Adam
+($\mathrm{lr}=10^{-3}$, cosine annealing). MADRL trains for 50 episodes
+with $\gamma=0.99$, $\varepsilon$ decaying from 0.1 to 1.0, replay
+batch size 16, and target network updated every 10 steps.
+
+
+Three real-world IoT datasets spanning heterogeneous wireless
+technologies are used, summarized in Table~\ref{tab:datasets}.
+The \textit{Sigfox Antwerp}~\cite{ref_sigfox} dataset contains 14,377
+uplink transmissions captured by 84 fixed base stations across an urban
+area, producing a 84-dimensional sparse RSSI signature per packet and
+representing a long-range, low-power wide-area network (LPWAN) with
+strong spatial structure.
+The \textit{LoRaWAN Italy}~\cite{ref_lorawan} dataset comprises 190,502
+outdoor sensor readings with five features (RSSI, SNR, soil temperature,
+humidity, battery voltage), covering a large-scale agricultural deployment
+where channel conditions vary substantially with distance and vegetation.
+The \textit{Indoor WiFi}~\cite{ref_indoor} dataset consists of 1,100
+fingerprint samples collected from five access points inside a building,
+where multipath propagation yields a compact but highly variable 5-dimensional
+RSSI vector.
+Together, the three datasets exercise the proposed framework under
+contrasting dimensionality (84 vs.\ 5), scale (1,100 to 190,502 samples),
+and deployment contexts (urban LPWAN, agricultural IoT, indoor WiFi).
+Quality thresholds are set to the per-dataset median RSSI to ensure
+approximately balanced binary class labels regardless of deployment-specific
+link-budget conventions.
+
+\begin{table}[t]
+\centering
+\caption{Summary of Real-World IoT Datasets}
+\label{tab:datasets}
+\setlength{\tabcolsep}{4pt}
+\renewcommand{\arraystretch}{1.15}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Property}        & \textbf{Antwerp}           & \textbf{LoRaWAN}           & \textbf{Indoor}           \\
+\midrule
+Technology               & Sigfox~\cite{ref_sigfox}   & LoRaWAN~\cite{ref_lorawan} & WiFi~\cite{ref_indoor}    \\
+Samples                  & 14,377                     & 190,502                    & 1,100                     \\
+Input dim $d$            & 84                         & 5                          & 5                         \\
+Features                 & \shortstack[c]{RSSI\\$\times$84~BSs}
+                         & \shortstack[c]{RSSI, SNR,\\soil temp.,\\humid., batt.}
+                         & \shortstack[c]{RSSI\\$\times$5~APs}                     \\
+Quality threshold $\tau$ & $-$123.9~dBm               & $-$69.0~dBm                & $-$63.9~dBm               \\
+Good-quality ratio       & 50.0\%                     & 47.9\%                     & 49.5\%                    \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Comparison methods.
+Because the proposed system is an integrated three-stage framework, the
+evaluation distinguishes two levels of comparison: \textit{module-level}
+reference methods that isolate the contribution of the DT-EKF stage, and
+\textit{framework-level} baselines that compare alternative resource
+allocation policies against the full pipeline.
+
+\textit{Module-level references for DT-EKF.}
+To assess the quality classification capability of the DT-EKF module,
+two representative unsupervised static clustering methods are used:
+K-Means ($k=2$) partitions observations via hard assignment, while
+Gaussian Mixture Model (GMM, $k=2$) extends this with probabilistic
+soft assignments and full covariance modelling.
+Setting $k=2$ directly matches the binary good/poor quality objective.
+Neither method exploits temporal dynamics, so comparing them against the
+DT-EKF quantifies the benefit of recursive state estimation over
+snapshot-based clustering.
+For anomaly detection, three classical single-task detectors are used
+as module-level references:
+Local Outlier Factor (LOF, $k=20$) represents density-based detection;
+Isolation Forest (IF, 200 trees) represents ensemble-based detection;
+and Rolling Z-Score (window $W=20$, $z_t=|x_t-\bar{x}|/\hat{\sigma}$)
+represents lightweight univariate statistical detection.
+These are compared against the DT-EKF NIS $\chi^2$ test to evaluate
+whether multivariate probabilistic state estimation improves over
+single-task classical methods.
+Critically, none of these module-level references is a full-system
+alternative: K-Means/GMM cannot detect anomalies, and
+LOF/IF/Z-Score cannot classify quality.
+The proposed DT-EKF is the only evaluated method to deliver both
+capabilities simultaneously within a single recursive filter pass.
+
+\textit{Framework-level baselines for MADRL-GAT.}
+Three resource allocation policies are compared against the full
+MADRL-GAT pipeline to bracket performance and isolate architectural
+contributions:
+Random policy (uniform random action) establishes a stochastic lower bound;
+Greedy-min (always action~0, minimum power) represents a deterministic
+conservative heuristic; and DQN-noGAT replaces the GAT encoder with a
+plain Multilayer Perceptron (MLP), isolating the contribution of
+inter-agent graph-attention coordination.
+
+\subsection{VAE Semantic Compression}
+
+\begin{figure*}[t]
+  \centering
+  \subfloat[Antwerp ($84\!\to\!16$)]{%
+    \includegraphics[width=0.32\textwidth]{vae_loss_antwerp}}
+  \hfill
+  \subfloat[LoRaWAN ($5\!\to\!3$)]{%
+    \includegraphics[width=0.32\textwidth]{vae_loss_lorawan}}
+  \hfill
+  \subfloat[Indoor ($5\!\to\!3$)]{%
+    \includegraphics[width=0.32\textwidth]{vae_loss_indoor}}
+  \caption{VAE training loss curves. Solid: reconstruction loss,
+  dashed: KL divergence. Both converge within 30 epochs.}
+  \label{fig:vae_loss}
+\end{figure*}
+
+
+Fig.~\ref{fig:vae_loss} illustrates the training dynamics of the VAE across the three datasets.
+Both the reconstruction loss and the KL divergence converge rapidly, with the dominant
+improvement occurring within the first few epochs. This fast convergence is a direct
+consequence of the data characteristics rather than a training artifact.
+For Sigfox Antwerp, the 84-dimensional RSSI signature is spatially sparse: each device
+is typically received by only 2--5 out of 84 base stations, so the majority of input
+dimensions are zero after normalization. The VAE quickly learns to reconstruct these
+inactive dimensions to zero, which accounts for the steep initial loss drop.
+For LoRaWAN and Indoor, the input dimensionality is already low (5 features), making
+the $5\!\to\!3$ compression an intrinsically simple task that any small network solves
+within a few gradient steps. In both cases, the KL term stabilizes rapidly because
+the low-dimensional, pre-normalized data provides little information beyond what the
+prior already captures, so the encoder settles at a compact posterior early in training.
+The remaining epochs refine the reconstruction of the few active or informative
+dimensions, yielding marginal but consistent improvement. Critically, the latent codes
+produced after this rapid convergence are sufficiently informative to drive stable
+MADRL-GAT learning in Stage~3, confirming that early saturation of the loss does not
+imply poor representation quality.
+
+Evaluating compression efficacy, the Sigfox Antwerp configuration attains an MSE of $0.0082$ under a severe dimension reduction factor of $5.25\times$ (from $84$ to $16$). This significant compressibility is attributed to the spatial sparsity inherent in the 84-dimensional Sigfox signatures, as transmissions are generally captured by only a limited subset of base stations. Consequently, the VAE proficiently mitigates spatial redundancy and observational noise to isolate the essential semantic features.
+
+In contrast, the LoRaWAN and Indoor datasets, which are characterized by denser, lower-dimensional sensor telemetry, yield MSEs of $0.016$ and $0.054$, respectively, with a compression factor of $1.67\times$ ($5 \to 3$). Despite the more modest reduction ratio, the architecture robustly distills a compact and noise-tolerant semantic state. This state-space contraction is pivotal for the downstream MADRL operations (Stage 3), as it exponentially curtails the state-space dimensionality, which in turn accelerates Q-network convergence and enhances overall sample efficiency.
+
+These results demonstrate that the VAE effectively captures the underlying semantic structure across heterogeneous IoT telemetry, providing compact yet informative latent representations that reduce state-space complexity for all downstream stages.
+
+\subsection{Digital Twin EKF Performance}
+
+\begin{figure*}[t]
+  \centering
+  \subfloat[Antwerp (RSSI-RMSE=3.48~dBm)]{%
+    \includegraphics[width=0.32\textwidth]{dt_estimation_antwerp}}
+  \hfill
+  \subfloat[LoRaWAN (RSSI-RMSE=5.51~dBm)]{%
+    \includegraphics[width=0.32\textwidth]{dt_estimation_lorawan}}
+  \hfill
+  \subfloat[Indoor (RSSI-RMSE=2.47~dBm)]{%
+    \includegraphics[width=0.32\textwidth]{dt_estimation_indoor}}
+  \caption{DT-EKF state estimation over 500 time steps.}
+  \label{fig:dt}
+\end{figure*}
+
+Fig.~\ref{fig:dt} shows that the EKF effectively smooths injected faults
+and tracks the underlying channel trend. RSSI-RMSE is highest for LoRaWAN
+(5.51~dBm) owing to its wide dynamic range ($-20$ to $-120$~dBm).
+Indoor achieves the lowest RMSE (2.47~dBm) due to spatially constrained
+WiFi propagation.
+
+Table~\ref{tab:main_results} compares all methods comprehensively.
+DT-EKF outperforms K-Means and GMM on quality classification across all
+datasets. The most significant improvement is on LoRaWAN, where K-Means
+and GMM achieve AUC $\approx0.505$ (near-random), while DT-EKF reaches
+$\text{AUC}=0.9106$ (a relative gain of +80.4\%). For Indoor, Youden's-J threshold optimization pushes accuracy to 0.934, surpassing
+K-Means by +16.6 percentage points.
+
+\begin{figure*}[t]
+  \centering
+  \subfloat[Antwerp]{%
+    \includegraphics[width=0.48\textwidth]{roc_comparison_antwerp}}
+  \hfill
+  \subfloat[LoRaWAN]{%
+    \includegraphics[width=0.48\textwidth]{roc_comparison_lorawan}}
+  \\[0.5em]
+  \centering
+  \subfloat[Indoor]{%
+    \includegraphics[width=0.48\textwidth]{roc_comparison_indoor}}
+  \caption{ROC curves per dataset.}
+  \label{fig:roc}
+\end{figure*}
+\begin{table*}[t]
+\centering
+\caption{Comprehensive Performance Comparison on Three IoT Datasets.}
+\label{tab:main_results}
+\setlength{\tabcolsep}{4pt}
+\renewcommand{\arraystretch}{1.1}
+\begin{tabular}{llccccccc}
+\toprule
+\multirow{2}{*}{\textbf{Dataset}} &
+\multirow{2}{*}{\textbf{Method}} &
+\multicolumn{2}{c}{\textbf{Quality Classification}} &
+\multicolumn{4}{c}{\textbf{Anomaly Detection (AUC)}} &
+\multirow{2}{*}{\textbf{VAE MSE}} \\
+\cmidrule(lr){3-4}\cmidrule(lr){5-8}
+ & & \textbf{Acc.} & \textbf{AUC} &
+\textbf{LOF} & \textbf{IF} & \textbf{Z-Score} & \textbf{DT-EKF}$^\dagger$ & \\
+\midrule
+\multirow{3}{*}{Antwerp}
+ & K-Means & 0.730 & 0.676 &
+   \multirow{3}{*}{0.375} & \multirow{3}{*}{\textbf{0.949}} &
+   \multirow{3}{*}{0.920} & \multirow{3}{*}{0.835} &
+   \multirow{3}{*}{0.0082} \\
+ & GMM     & 0.656 & 0.697 & & & & & \\
+ & \textbf{DT-EKF} & \textbf{0.818} & \textbf{0.867} & & & & & \\
+\midrule
+\multirow{3}{*}{LoRaWAN}
+ & K-Means & 0.505 & 0.505 &
+   \multirow{3}{*}{0.500} & \multirow{3}{*}{\textbf{0.992}} &
+   \multirow{3}{*}{0.919} & \multirow{3}{*}{0.796} &
+   \multirow{3}{*}{0.0160} \\
+ & GMM     & 0.505 & 0.516 & & & & & \\
+ & \textbf{DT-EKF} & \textbf{0.846} & \textbf{0.911} & & & & & \\
+\midrule
+\multirow{3}{*}{Indoor}
+ & K-Means & 0.767 & 0.830 &
+   \multirow{3}{*}{0.307} & \multirow{3}{*}{0.898} &
+   \multirow{3}{*}{0.958} & \multirow{3}{*}{\textbf{0.987}} &
+   \multirow{3}{*}{0.0537} \\
+ & GMM     & 0.611 & 0.666 & & & & & \\
+ & \textbf{DT-EKF} & \textbf{0.934} & \textbf{0.972} & & & & & \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+For anomaly detection, Table~\ref{tab:main_results} reveals a
+structured hierarchy among the baselines.
+LOF achieves near-random AUC across all three datasets
+(0.375 / 0.500 / 0.307), confirming that density-based neighbourhood
+methods are poorly suited to the spike-and-drop injection pattern used
+in this evaluation.
+Isolation Forest (IF) is the strongest single-task baseline on Antwerp
+(AUC 0.949) and LoRaWAN (0.992), with its
+random sub-space isolation well-matched to these abrupt fault patterns.
+Z-Score ranks second on both (0.920 / 0.919), while DT-EKF trails
+(0.835 / 0.796) on these two single-dominant-channel datasets.
+DT-EKF reverses the ranking on Indoor (0.987), surpassing
+Z-Score (0.958) and IF (0.898), because the bivariate NIS statistic
+jointly exploits complementary fault signatures in both RSSI and the
+active base-station count, a structural advantage unavailable to
+univariate or purely feature-based detectors.
+Crucially, IF and Z-Score are dedicated single-task anomaly detectors
+that provide no quality-classification capability, while DT-EKF
+simultaneously produces Youden-optimal quality labels and anomaly scores
+within the same recursive filter pass, without any additional model,
+training data, or labels.
+This dual-task capability is the defining advantage of the proposed
+DT and cannot be reproduced by any single competing method.
+
+These results establish that the DT-EKF is the strongest
+multi-purpose monitoring component across the pipeline: it
+consistently surpasses static clustering baselines in quality
+classification by $+$28.3\%, $+$80.4\%, and $+$17.1\% AUC on
+Antwerp, LoRaWAN, and Indoor, and provides competitive anomaly
+detection, winning decisively on Indoor.
+Among single-task anomaly detectors, IF achieves the highest AUC on
+two datasets but its inability to provide quality labels or temporal
+state estimates makes it a complement, not an alternative, to the
+proposed unified pipeline.
+
+\subsection{MADRL-GAT Resource Allocation}
+
+\begin{figure*}[t]
+  \centering
+  \subfloat[Antwerp (MADRL-GAT Eval: 2305.05)]{%
+    \includegraphics[width=0.32\textwidth]{madrl_rewards_antwerp}}
+  \hfill
+  \subfloat[LoRaWAN (MADRL-GAT Eval: 2519.26)]{%
+    \includegraphics[width=0.32\textwidth]{madrl_rewards_lorawan}}
+  \hfill
+  \subfloat[Indoor (MADRL-GAT Eval: 3088.95)]{%
+    \includegraphics[width=0.32\textwidth]{madrl_rewards_indoor}}
+  \caption{MADRL-GAT training reward.}
+  \label{fig:madrl}
+\end{figure*}
+
+Fig.~\ref{fig:madrl} shows monotonically increasing rewards across all
+datasets, confirming stable policy convergence within 50 training
+episodes. Table~\ref{tab:madrl_results} compares the evaluation rewards
+of all resource-allocation methods.
+
+\begin{table}[t]
+\centering
+\caption{Evaluation reward (mean over 20 episodes).
+$\dagger$~Reward ceiling reached by all deterministic policies.}
+\label{tab:madrl_results}
+\renewcommand{\arraystretch}{1.1}
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Dataset} & \textbf{Random} & \textbf{Greedy-min} &
+\textbf{DQN-noGAT} & \textbf{MADRL-GAT (Proposed)} \\
+\midrule
+Antwerp  & 1813.9 & 1916.0 & 2119.0 & \textbf{2305.1} \\
+LoRaWAN  & 1727.1 & 2519.3$^\dagger$ & 2519.3$^\dagger$ & \textbf{2519.3}$^\dagger$ \\
+Indoor   & 2236.6 & 3088.9$^\dagger$ & 3088.9$^\dagger$ & \textbf{3088.9}$^\dagger$ \\
+\bottomrule
+\end{tabular}}
+\end{table}
+
+On Antwerp, MADRL-GAT achieves a reward of 2305.1, outperforming
+DQN-noGAT (2119.0, $+$8.8\%), Greedy-min (1916.0, $+$20.3\%), and
+Random (1813.9, $+$27.1\%), demonstrating the clear benefit of
+graph-attention cooperative learning on the high-dimensional
+84-feature Sigfox dataset.
+On LoRaWAN and Indoor, all three deterministic policies (Greedy-min,
+DQN-noGAT, MADRL-GAT) converge to the same maximum-feasible reward
+(2519.3 and 3088.9 respectively), as the compact 5-feature input and
+fully-connected graph leave little room for the GAT encoder to
+differentiate agent strategies. Random is the only policy that
+fails to saturate, confirming that any structured policy suffices
+but structure is required.
+The compact 3-dimensional latent state for LoRaWAN and Indoor
+(vs.\ raw 5-dimensional features) accelerates Q-network convergence,
+a direct benefit of Stage~1 VAE compression.
+
+These observations confirm that the integration of VAE-compressed
+semantic states with quality-aware reward shaping enables stable and
+efficient policy learning, regardless of the underlying wireless
+technology and input feature dimensionality.
+
+\subsection{Discussion}
+
+DT-EKF is the only approach in the evaluation that simultaneously
+performs quality classification and anomaly detection: K-Means and GMM
+provide quality labels only, while LOF, IF, and Z-Score provide anomaly
+scores only.
+DT-EKF achieves quality AUC improvements of $+28.3\%$, $+80.4\%$,
+and $+17.1\%$ over K-Means on Antwerp, LoRaWAN, and Indoor respectively,
+confirming the value of temporal state estimation over static clustering.
+For anomaly detection, IF is the strongest single-task baseline on
+Antwerp (0.949) and LoRaWAN (0.992), while DT-EKF is the strongest
+overall on Indoor (0.987), where its bivariate NIS exploits
+complementary fault signatures in both channels simultaneously.
+LOF is near-random on all datasets (0.375 / 0.500 / 0.307), showing
+that density-based detection is ill-suited to abrupt injection faults.
+This trade-off must be weighed against a fundamental capability
+asymmetry: IF and Z-Score are dedicated anomaly detectors with no
+quality-classification ability, whereas DT-EKF delivers both outputs
+in a single recursive filter pass with no additional model, training
+data, or computational overhead which is a dual-task efficiency that
+no single-purpose detector can match.
+
+\textit{Computational overhead.}
+The framework's online inference involves three lightweight stages:
+a VAE encoder forward pass ($\mathcal{O}(d\,d_z)$), an EKF predict-update
+cycle ($\mathcal{O}(m^2)$ for the $m{=}2$ channel state), and a GAT
+Q-network pass ($\mathcal{O}(N^2 d_z)$ per head).
+All operations run on CPU in under 1~ms per time step in our experiments.
+Formal latency profiling on constrained edge hardware (e.g., ARM
+Cortex-M or Raspberry Pi) remains a priority for future hardware-in-the-loop
+validation to confirm real-time suitability on the most resource-limited IoT nodes.
+
+\textit{Concept drift.}
+The VAE encoder is trained offline on a fixed data snapshot, making its
+latent codes sensitive to distribution shift caused by seasonal variation,
+hardware aging, or network reconfiguration.
+To mitigate this, a lightweight periodic fine-tuning strategy is proposed:
+during scheduled low-traffic windows, a small batch of recent unlabeled
+measurements updates only the encoder parameters via the reconstruction
+loss, leaving the frozen DT and MADRL stages intact.
+This continual adaptation keeps the semantic feature space aligned with
+the evolving channel distribution while preserving downstream pipeline
+stability, and is planned as part of a deployed edge-IoT prototype.
+
+% ============================================================
+\section{Conclusion}
+\label{sec:conclusion}
+% ============================================================
+
+A unified three-stage framework for intelligent IoT resource management
+has been presented, coupling VAE semantic compression, DT-EKF
+joint monitoring, and MADRL-GAT cooperative resource allocation into a
+sequential pipeline. VAE-compressed latent codes reduce the MADRL state
+space, and EKF quality labels and anomaly flags are fed directly into
+the per-agent reward, establishing a concrete information path from
+sensing to resource allocation. Unlike prior approaches that address
+semantic compression, quality classification, and anomaly detection in
+isolation, the proposed pipeline delivers all three capabilities in a
+single system validated across three wireless technologies.
+The DT-EKF substantially outperforms static unsupervised
+baselines in quality classification across all evaluated IoT technologies
+while simultaneously detecting anomalies within the same filter pass,
+a dual capability unavailable in any single competing method.
+For anomaly detection, DT-EKF achieves a decisive advantage on Indoor
+(AUC 0.987 vs.\ IF 0.898, Z-Score 0.958). On Antwerp and LoRaWAN,
+Isolation Forest achieves higher single-channel AUC (0.949 / 0.992)
+but provides no quality-classification capability, whereas DT-EKF
+delivers both outputs simultaneously without additional computational cost. VAE-compressed semantic states
+reduce the effective state space, enabling stable policy convergence
+within 50 training episodes across all three datasets. Cross-technology
+generalizability (Sigfox, LoRaWAN, WiFi) is confirmed, extending beyond
+the single-domain evaluations in prior work. Future work will explore
+Unscented KF for stronger nonlinear channel modeling, ablation studies
+to quantify the contribution of each stage, Proximal Policy Optimization (PPO)-based agents for
+improved sample efficiency, and federated deployment for
+privacy-preserving distributed IoT management.
+
+% ============================================================
+\begin{thebibliography}{99}
+
+\bibitem{ref_iot_overview}
+A. Al-Fuqaha, M. Guizani, M. Mohammadi, M. Aledhari, and M. Ayyash,
+``Internet of Things: A survey on enabling technologies, protocols, and
+applications,''
+\textit{IEEE Commun. Surv. Tutor.}, vol.~17, no.~4, pp.~2347--2376, 2015.
+
+\bibitem{ref_drl_comm2}
+Y. Xiao, Y. Song, and J. Liu,
+``Multi-agent deep reinforcement learning based resource allocation for ultra-reliable low-latency Internet of controllable things,''
+\textit{IEEE Trans. Wireless Commun.}, vol.~22, no.~8, pp.~5414--5430, 2023.
+
+\bibitem{ref_youden}
+W.~J. Youden,
+``Index for rating diagnostic tests,''
+\textit{Cancer}, vol.~3, no.~1, pp.~32--35, 1950.
+
+\bibitem{ref_vae_wireless}
+C. Liu, C. Guo, Y. Yang, and N. Jiang,
+``Adaptable semantic compression and resource allocation for
+task-oriented communications,''
+\textit{IEEE Trans. Cogn. Commun. Netw.}, vol.~10, no.~3,
+pp.~769--782, 2024.
+
+\bibitem{ref_dt_iot}
+R. Minerva, G. M. Lee, and N. Crespi,
+``Digital twin in the IoT context: A survey on technical features,
+scenarios, and architectural models,''
+\textit{Proc. IEEE}, vol.~108, no.~10, pp.~1785--1824, 2020.
+
+\bibitem{ref_drl_iot}
+X. Xiong, K. Zheng, L. Lei, and L. Hou,
+``Resource allocation based on deep reinforcement learning in IoT edge
+computing,''
+\textit{IEEE J. Sel. Areas Commun.}, vol.~38, no.~6,
+pp.~1133--1146, 2020.
+
+\bibitem{ref_dt_resource}
+L. Tang, Y. Du, Q. Liu, J. Li, S. Li, and Q. Chen,
+``Digital-twin-assisted resource allocation for network slicing in
+Industry 4.0 and beyond using distributed deep reinforcement learning,''
+\textit{IEEE Internet Things J.}, vol.~10, no.~19,
+pp.~16989--17006, 2023.
+
+\bibitem{ref_semadt}
+B. Hazarika, O. A. Dobre, and T. Q. Duong,
+``Digital twin and semantic-aware multi-agent RL for maritime search
+and rescue operations,''
+in \textit{Proc. IEEE PIMRC}, 2025.
+
+\bibitem{ref_anomaly_survey}
+A. De Benedictis, F. Flammini, N. Mazzocca, A. Somma, and F. Vitale,
+``Digital twins for anomaly detection in the industrial Internet of
+Things: Conceptual architecture and proof-of-concept,''
+\textit{IEEE Trans. Ind. Inform.}, vol.~19, no.~12,
+pp.~11553--11563, 2023.
+
+\bibitem{ref_gat_comm}
+P. Velickovic, G. Cucurull, A. Casanova, A. Romero, P. Li\`{o},
+and Y. Bengio,
+``Graph attention networks,''
+in \textit{Proc. ICLR}, 2018.
+
+\bibitem{ref_vae}
+D. P. Kingma and M. Welling,
+``Auto-encoding variational Bayes,''
+in \textit{Proc. ICLR}, 2014.
+
+\bibitem{ref_ekf}
+D. Simon,
+``Optimal State Estimation: Kalman, $H_\infty$, and Nonlinear Approaches,''
+John Wiley \& Sons, 2006.
+
+\bibitem{ref_sigfox}
+R. Calvo-Palomino et al.,
+``Incremental learning meets transfer learning: Application to
+multi-site Sigfox LPWAN deployments,''
+in \textit{Proc. ACM IoTDI}, 2021.
+
+\bibitem{ref_lorawan}
+F. Cuomo et al.,
+``EXPLoRa: Extending the performance of LoRa by suitable spreading
+factor allocations,''
+in \textit{Proc. IEEE WiMob}, 2017.
+
+\bibitem{ref_indoor}
+J. Torres-Sospedra et al.,
+``UJIIndoorLoc: A new multi-building and multi-floor database for WLAN
+fingerprint-based indoor localization,''
+in \textit{Proc. IEEE IPIN}, 2014.
+
+\bibitem{ref_wali2025}
+S. Wali, M.~I. Khan, and M. Imran,
+``Semantic-aware reinforcement and ensemble learning for signal management
+and anomaly detection in IoT systems,''
+\textit{Sci. Rep.}, vol.~15, no.~1, p.~42594, 2025.
+
+\end{thebibliography}
+
+\end{document}

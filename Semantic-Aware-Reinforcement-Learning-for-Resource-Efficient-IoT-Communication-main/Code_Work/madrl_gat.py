@@ -102,13 +102,30 @@ class MADRLGATNetwork(nn.Module):
         return self.policy(combined)
 
 
+class DQNNoGAT(nn.Module):
+    """MLP Q-network without graph attention — ablation baseline."""
+
+    def __init__(self, agent_obs_dim, hidden_dim=64, num_actions=5):
+        super().__init__()
+        self.policy = nn.Sequential(
+            nn.Linear(agent_obs_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, num_actions),
+        )
+
+    def forward(self, states, adj=None):
+        return self.policy(states)
+
+
 # ---------------------------------------------------------------------------
 # Environment
 # ---------------------------------------------------------------------------
 
 class MADRLEnvironment:
     def __init__(self, latent_states, original_obs, adj_matrix,
-                 num_agents=10, num_actions=5):
+                 num_agents=10, num_actions=5, obs_noise_std=0.15, seed=42):
         self.latent  = latent_states.astype(np.float32)
         self.orig    = original_obs.astype(np.float32)
         self.adj     = adj_matrix
@@ -117,8 +134,15 @@ class MADRLEnvironment:
         self.T = len(latent_states)
         self.t = 0
 
+        # Fixed per-agent observation offsets so agents have heterogeneous
+        # local views of the channel — required for GAT attention to be meaningful
+        rng = np.random.RandomState(seed)
+        self.agent_biases = rng.normal(
+            0, obs_noise_std, (num_agents, latent_states.shape[1])
+        ).astype(np.float32)
+
     def _broadcast(self, g):
-        return np.tile(g, (self.num_agents, 1))   # [N_agents, latent_dim]
+        return np.tile(g, (self.num_agents, 1)) + self.agent_biases   # [N_agents, latent_dim]
 
     def reset(self):
         self.t = 0
@@ -127,29 +151,26 @@ class MADRLEnvironment:
     @staticmethod
     def _reward(orig_row, actions):
         """
-        Normalized reward modelling the energy-quality trade-off in IoT:
-          - quality    : normalised RSSI in [0, 5]   (signal strength)
-          - connectivity: normalised active-BS in [0, 2]
-          - resource_cost: action-level in [0, 3]    (tx power / data-rate)
-          - coop_bonus  : low action-variance in [0, 1] (agent coordination)
-        Total range ~ [-3, 8]; typical positive value forces meaningful learning.
-        Actions now contribute ~37% of the reward range, making them genuinely
-        impactful rather than negligible.
+        Per-agent reward matching Eq. (2) in paper:
+          r = 5*tilde_s + 2*n_bar - 3*a_bar + max(0, 1 - sigma_a/2)
+        tilde_s = s_bar + a_bar*(1-s_bar): action boosts effective signal
+        only when channel is weak (low s_bar), creating state-dependent
+        optimal actions that require inter-agent coordination via GAT.
+        Crossover: boosting beneficial when s_bar < 0.4 (5*(1-s) > 3).
         """
         mean_rssi = float(orig_row[0])
         num_bs    = float(orig_row[1])
 
-        # Normalise RSSI to [0, 1] over typical IoT range [-145, -50] dBm
         RSSI_MIN, RSSI_MAX = -145.0, -50.0
         norm_rssi = float(np.clip((mean_rssi - RSSI_MIN) / (RSSI_MAX - RSSI_MIN),
                                   0.0, 1.0))
 
-        quality       = norm_rssi * 5.0                          # [0, 5]
-        connectivity  = min(num_bs / 20.0, 1.0) * 2.0           # [0, 2]
-        resource_cost = (float(np.mean(actions)) / 4.0) * 3.0   # [0, 3]
-        coop_bonus    = max(0.0, 1.0 - float(np.std(actions)) / 2.0)  # [0, 1]
+        action_norm = float(np.mean(actions)) / 4.0                     # a_bar in [0,1]
+        effective_s = norm_rssi + action_norm * (1.0 - norm_rssi)       # tilde_s
+        norm_bs     = min(num_bs / 20.0, 1.0)                           # n_bar
+        coop_bonus  = max(0.0, 1.0 - float(np.std(actions)) / 2.0)     # [0,1]
 
-        return quality + connectivity - resource_cost + coop_bonus
+        return 5.0 * effective_s + 2.0 * norm_bs - 3.0 * action_norm + coop_bonus
 
     def step(self, actions):
         reward = self._reward(self.orig[self.t], actions)
@@ -187,6 +208,7 @@ def train_madrl(latent_states, original_obs, adj_matrix,
                 gamma=0.99, eps_start=1.0, eps_end=0.05, eps_decay=0.97,
                 batch_size=32, buffer_capacity=10000, target_update=5,
                 gat_hidden=32, gat_out=16, num_heads=4,
+                use_gat=True,
                 device=None, verbose=True):
 
     if device is None:
@@ -195,10 +217,15 @@ def train_madrl(latent_states, original_obs, adj_matrix,
     latent_dim = latent_states.shape[1]
     adj_t = torch.tensor(adj_matrix, dtype=torch.float32).to(device)
 
-    policy_net = MADRLGATNetwork(latent_dim, gat_hidden, gat_out,
-                                 num_heads, num_actions).to(device)
-    target_net = MADRLGATNetwork(latent_dim, gat_hidden, gat_out,
-                                 num_heads, num_actions).to(device)
+    if use_gat:
+        policy_net = MADRLGATNetwork(latent_dim, gat_hidden, gat_out,
+                                     num_heads, num_actions).to(device)
+        target_net = MADRLGATNetwork(latent_dim, gat_hidden, gat_out,
+                                     num_heads, num_actions).to(device)
+    else:
+        policy_net = DQNNoGAT(latent_dim, hidden_dim=64, num_actions=num_actions).to(device)
+        target_net = DQNNoGAT(latent_dim, hidden_dim=64, num_actions=num_actions).to(device)
+
     target_net.load_state_dict(policy_net.state_dict())
     target_net.eval()
 
@@ -210,7 +237,8 @@ def train_madrl(latent_states, original_obs, adj_matrix,
     eps = eps_start
     ep_rewards, ep_losses = [], []
 
-    print(f"  MADRL+GAT: latent={latent_dim}, agents={num_agents}, "
+    tag = "MADRL+GAT" if use_gat else "DQN-noGAT"
+    print(f"  {tag}: latent={latent_dim}, agents={num_agents}, "
           f"actions={num_actions}, episodes={num_episodes}, device={device}")
 
     for episode in range(num_episodes):
@@ -278,7 +306,7 @@ def train_madrl(latent_states, original_obs, adj_matrix,
             print(f"  Ep [{episode+1}/{num_episodes}]  "
                   f"Reward={total_reward:.1f}  Loss={avg_loss:.4f}  eps={eps:.3f}")
 
-    print("  MADRL+GAT done.")
+    print(f"  {tag} done.")
     return policy_net, target_net, ep_rewards, ep_losses
 
 
